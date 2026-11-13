@@ -74,6 +74,8 @@ pub struct Report {
     pub child_status: Option<ChildStatus>,
     pub run_status: RunStatus,
     pub destinations: Vec<Destination>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comparison: Option<Box<crate::baseline::Comparison>>,
 }
 
 #[derive(Serialize)]

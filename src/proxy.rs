@@ -23,6 +23,7 @@ const MAX_CONNECTIONS: usize = 64;
 pub struct Proxy {
     pub mode: Mode,
     pub policy: Policy,
+    pub ci_hosts: Option<std::collections::BTreeSet<String>>,
     pub auth: String,
     pub records: Records,
     pub incomplete: AtomicBool,
@@ -231,7 +232,13 @@ where
         Head::Accept { host, consumed } => (host, consumed),
         Head::Reject(status) => return response(&mut stream, status).await,
     };
-    let (allowed, reason) = if local_name(&host) {
+    let (allowed, reason) = if state
+        .ci_hosts
+        .as_ref()
+        .is_some_and(|hosts| !hosts.contains(&host))
+    {
+        (false, "new_destination")
+    } else if local_name(&host) {
         (false, "non_public_destination")
     } else {
         state.policy.decision(state.mode, &host)

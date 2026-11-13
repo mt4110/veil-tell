@@ -321,6 +321,7 @@ impl Runner<'_> {
             emit_policy: None,
             fail_on_unknown: false,
             command: self.config.command.clone(),
+            comparison: Default::default(),
         };
         let execution = Execution {
             cwd: project.path(),

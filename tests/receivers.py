@@ -122,6 +122,153 @@ def emit_policy_test(cli, fixture, receiver, project, evidence, env):
     print("receiver case=policy-draft candidates=1 control_payloads=2 restricted_payloads=0 child_exit=0 exit=20")
 
 
+def destination_diff_test(cli, fixture, project, evidence, node_root=None):
+    baseline = evidence / "baseline.json"
+    changed = evidence / "changed.json"
+    report = evidence / "diff.json"
+    command = [sys.executable, "-B", "probe.py", "observe-candidates"]
+    baseline_cmd = [fixture, "observe", "--backend", "isolated", "--baseline-out", baseline]
+    with socket.socket() as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.listen()
+        receiver.settimeout(5)
+        host, port = receiver.getsockname()
+        env = dict(os.environ, VEIL_TELL_FIXTURE_RECEIVER=f"{host}:{port}")
+
+        def run_and_receive(argv, count):
+            payloads = []
+            def acknowledge():
+                for _ in range(count):
+                    conn, _ = receiver.accept()
+                    with conn:
+                        conn.settimeout(5)
+                        with conn.makefile("rb") as stream:
+                            payloads.append(stream.read())
+                        conn.sendall(b"ACK")
+            thread = threading.Thread(target=acknowledge)
+            thread.start()
+            try:
+                result = subprocess.run(argv, cwd=project, env=env, capture_output=True,
+                                        text=True, timeout=30)
+            finally:
+                thread.join(timeout=7)
+            assert len(payloads) == count, (result.stdout, result.stderr, payloads)
+            assert receive(receiver, 0) == []
+            return result, payloads
+
+        result, payloads = run_and_receive([*baseline_cmd, "--", *command], 2)
+        assert result.returncode == 0 and payloads == [b"first-connect", b"second-connect"]
+        before = baseline.read_bytes()
+        assert json.loads(before)["destinations"] == [{"host": "allowed.test", "port": 443, "attempts": 2}]
+
+        result, payloads = run_and_receive([
+            fixture, "observe", "--backend", "isolated", "--baseline", baseline,
+            "--fail-on-new", "--report", report, "--",
+            sys.executable, "-B", "probe.py", "new-destination",
+        ], 1)
+        assert result.returncode == 21 and payloads == [b"new-connect"], result.stderr
+        data = json.loads(report.read_text())
+        assert data["schema_version"] == 1
+        assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
+        assert [d["host"] for d in data["comparison"]["added"]] == ["new.test"]
+        assert [d["host"] for d in data["comparison"]["removed"]] == ["allowed.test"]
+
+        result, _ = run_and_receive([
+            cli, "ci", "--baseline", baseline, "--report", changed, "--",
+            sys.executable, "-B", "probe.py", "new-destination",
+        ], 0)
+        assert result.returncode == 21 and "CONNECT=403" in result.stdout, result.stderr
+        data = json.loads(changed.read_text())
+        assert data["coverage"]["direct_attempt_destinations"] == "not_observed"
+        assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
+        event, = data["destinations"]
+        assert (event["reason"], event["result"], event["sent_bytes"], event["received_bytes"]) == (
+            "new_destination", "blocked", 0, 0)
+        failed = evidence / "failed-child.json"
+        result, _ = run_and_receive([
+            cli, "ci", "--baseline", baseline, "--report", failed, "--",
+            "/bin/sh", "-ec", '"$@"; exit 9', "probe", sys.executable, "-B",
+            "probe.py", "new-destination",
+        ], 0)
+        assert result.returncode == 21, result.stderr
+        data = json.loads(failed.read_text())
+        assert data["child_status"]["exit_code"] == 9
+        assert data["comparison"]["status"] == "new_destinations_only"
+        assert data["comparison"]["removed"] == []
+
+        missing = evidence / "missing.json"
+        result, _ = run_and_receive([
+            cli, "ci", "--baseline", missing, "--", "/bin/echo", "must-not-start",
+        ], 0)
+        assert result.returncode == 125 and not result.stdout
+
+        result, _ = run_and_receive([
+            cli, "observe", "--baseline-out", missing, "--", "/bin/sh", "-c", "exit 9",
+        ], 0)
+        assert result.returncode == 9 and not missing.exists()
+        assert baseline.read_bytes() == before
+        print("receiver case=destination-diff observe_payload=1 ci_payload=0 exit=21")
+
+        if node_root:
+            npm_destination_diff(cli, project, evidence, Path(node_root).resolve())
+
+
+def npm_destination_diff(cli, project, evidence, runtime):
+    demo = project / "destination-diff"
+    shutil.copytree(SCRIPT.parent / "fixtures" / "destination-diff", demo)
+    if sys.platform == "linux":
+        shutil.copytree(runtime, demo / "runtime", symlinks=True)
+        runtime = demo / "runtime"
+    env = dict(os.environ, PATH=f"{runtime / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+    args = ["npm", "install", "--foreground-scripts", "--no-audit", "--no-fund",
+            "--no-update-notifier", "--cache=.npm-cache"]
+    baseline = evidence / "npm-baseline.json"
+    report = evidence / "npm-diff.json"
+
+    def invoke(argv):
+        return subprocess.run(argv, cwd=demo, env=env, capture_output=True, text=True, timeout=35)
+
+    result = invoke([cli, "observe", "--backend", "isolated", "--baseline-out", baseline, "--", *args])
+    assert result.returncode == 0, result.stderr
+    assert json.loads(baseline.read_text())["destinations"] == []
+    automatic = invoke([cli, *args])
+    assert automatic.returncode == 0 and "Baseline saved" in automatic.stderr
+    stable = invoke([cli, *args])
+    assert stable.returncode == 0 and "No destination changes" in stable.stderr
+    manifest = demo / "package.json"
+    package = json.loads(manifest.read_text())
+    package["dependencies"] = {"veil-tell-demo-postinstall": "file:./postinstall"}
+    manifest.write_text(json.dumps(package))
+    result = invoke([cli, "observe", "--backend", "isolated", "--baseline", baseline,
+                     "--fail-on-new", "--report", report, "--", *args])
+    print(result.stdout, end="")
+    print(result.stderr, end="")
+    assert result.returncode == 21, (result.stdout, result.stderr)
+    data = json.loads(report.read_text())
+    assert data["child_status"]["exit_code"] == 0
+    assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
+    assert data["comparison"]["added"] == [{"host": "postinstall.local", "port": 443, "attempts": 1}]
+    assert data["destinations"][0]["reason"] == "non_public_destination"
+    ci_report = evidence / "npm-ci-diff.json"
+    result = invoke([cli, "ci", "--baseline", baseline, "--report", ci_report, "--", *args])
+    assert result.returncode == 21, (result.stdout, result.stderr)
+    ci_data = json.loads(ci_report.read_text())
+    assert ci_data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
+    assert ci_data["comparison"]["added"] == data["comparison"]["added"]
+    assert ci_data["destinations"][0]["reason"] == "new_destination"
+    automatic = invoke([cli, *args])
+    assert automatic.returncode == 0 and "+ postinstall.local:443 (1)" in automatic.stderr
+    default_baseline, = (demo / ".veil-tell").glob("baseline-*.json")
+    assert json.loads(default_baseline.read_text())["destinations"] == []
+    accepted = invoke([cli, "accept"])
+    assert accepted.returncode == 0, accepted.stderr
+    assert json.loads(default_baseline.read_text())["destinations"] == data["comparison"]["added"]
+    stable = invoke([cli, *args])
+    assert stable.returncode == 0 and "No destination changes" in stable.stderr
+    print(f"fixture os={sys.platform} npm_exit=0 veil_tell_exit=21")
+    print("fixture comparison " + json.dumps(data["comparison"], sort_keys=True))
+
+
 def run(cli, fixture, node_root=None):
     cli, fixture = Path(cli).resolve(), Path(fixture).resolve()
     ip = os.environ.get("VEIL_TELL_TEST_IP", "127.0.0.1")
@@ -204,6 +351,7 @@ def run(cli, fixture, node_root=None):
             assert child.returncode == 0 and "EBADF" in child.stdout, (child.stdout, child.stderr)
             assert receive(receiver, 1) == [b""]
             print("receiver case=inherited-fd connections=1 payload_bytes=0 errno=EBADF")
+        destination_diff_test(cli, fixture, project, evidence, node_root)
         if node_root:
             npm_test(fixture, Path(node_root).resolve(), project, evidence, policies["allow"], ip)
     print("PASS: CLI receiver, exit status, and JSON checks")
@@ -281,6 +429,8 @@ def npm_test(fixture, runtime, project, evidence, policy, ip):
 if __name__ == "__main__":
     if sys.argv[1] == "probe":
         probe(*sys.argv[2:])
+    elif sys.argv[1] == "new-destination":
+        connect_probe("new.test", "new")
     elif sys.argv[1] == "observe-candidates":
         connect_probe("ALLOWED.test.", "first")
         connect_probe("allowed.test", "second")

@@ -1,3 +1,4 @@
+mod baseline;
 mod cli;
 mod isolation;
 mod policy;
@@ -114,12 +115,26 @@ async fn run_command(
     {
         return Err(error("--report and --emit-policy require different paths"));
     }
-    let outputs: Vec<_> = report
+    let comparison = options
+        .comparison
+        .requested()
+        .then(|| baseline::Session::prepare(&options.comparison, cwd, &options.command))
+        .transpose()?;
+    let mut outputs: Vec<_> = report
         .iter()
         .chain(&policy_output)
         .map(OutputFile::path)
+        .chain(comparison.as_ref().and_then(baseline::Session::output))
         .chain(protected_outputs.iter().copied())
         .collect();
+    let count = outputs.len();
+    outputs.sort_unstable();
+    outputs.dedup();
+    if count != outputs.len() {
+        return Err(error(
+            "choose distinct paths for the report and generated files",
+        ));
+    }
     if options.backend == Backend::Isolated {
         isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
     }
@@ -127,6 +142,16 @@ async fn run_command(
     let proxy = Arc::new(proxy::Proxy {
         mode: options.mode,
         policy,
+        ci_hosts: if options.comparison.ci {
+            Some(
+                comparison
+                    .as_ref()
+                    .ok_or_else(|| error("CI baseline is missing"))?
+                    .ci_endpoints()?,
+            )
+        } else {
+            None
+        },
         auth: format!(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(format!("veil:{secret}"))
@@ -251,9 +276,6 @@ async fn run_command(
         .iter()
         .map(|destination| destination.attempts)
         .sum();
-    eprintln!(
-        "veil-tell: {reason} (exit {exit_code}). Recorded HTTP CONNECT requests: {connect_requests}. Direct connection attempts are outside the capture scope."
-    );
     let isolation = match options.backend {
         Backend::Proxy => "not_requested",
         Backend::Isolated
@@ -263,6 +285,38 @@ async fn run_command(
         }
         Backend::Isolated => "unconfirmed",
     };
+    let comparison = if let Some(session) = comparison {
+        let ci_denial = options.comparison.ci
+            && reason == "child_failed"
+            && status.is_some_and(|status| status.code().is_some())
+            && destinations
+                .iter()
+                .any(|event| event.reason == "new_destination");
+        let mut diff = if exit_code == 0 || ci_denial {
+            match session.finish(options.backend, &destinations) {
+                Ok(diff) => diff,
+                Err(error) => {
+                    eprintln!("veil-tell: {error}");
+                    (exit_code, reason) = (SETUP_FAILURE, "baseline_failed");
+                    baseline::Comparison::skipped()
+                }
+            }
+        } else {
+            baseline::Comparison::skipped()
+        };
+        if ci_denial {
+            diff.retain_additions();
+        }
+        if diff.has_new() && (options.comparison.fail_on_new || options.comparison.ci) {
+            (exit_code, reason) = (baseline::NEW_DESTINATION, "new_destination");
+        }
+        Some(Box::new(diff))
+    } else {
+        None
+    };
+    eprintln!(
+        "veil-tell: {reason} (exit {exit_code}). Recorded HTTP CONNECT requests: {connect_requests}. Direct connection attempts are outside the capture scope."
+    );
     let result = Report {
         schema_version: 1,
         backend: options.backend,
@@ -284,9 +338,13 @@ async fn run_command(
         child_status: status.map(Into::into),
         run_status: RunStatus { exit_code, reason },
         destinations,
+        comparison,
     };
     if let Some(file) = report {
         file.save_report(&result)?;
+    }
+    if let Some(diff) = &result.comparison {
+        diff.display(options.comparison.automatic);
     }
     Ok(result)
 }
@@ -304,12 +362,31 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
             .ok_or_else(|| error("invalid internal relay invocation"))?;
         return isolation::linux::inside(secret, &args[2..]).await;
     }
-    if args.first().is_some_and(|arg| isolation::is_help(arg)) {
+    if args.as_slice() == ["--version"] {
+        println!("veil-tell {}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
+    if args.first().is_some_and(|arg| isolation::is_help(arg))
+        || (args.len() == 2
+            && matches!(
+                args[0].to_str(),
+                Some("observe" | "restrict" | "ci" | "accept")
+            )
+            && isolation::is_help(&args[1]))
+    {
         println!("{}", cli::USAGE);
         return Ok(0);
     }
     if args.first().is_some_and(|arg| arg == "verify") {
         return verify::run(args.into_iter().skip(1), fixture).await;
+    }
+    if args.first().is_some_and(|arg| arg == "accept") {
+        if args.len() != 1 {
+            return Err(error(
+                "accept takes no arguments; run veil-tell accept in the project directory",
+            ));
+        }
+        return baseline::accept(&std::env::current_dir()?.canonicalize()?);
     }
     run(Options::parse(args)?, fixture).await
 }
@@ -330,6 +407,7 @@ pub fn entry(fixture: Option<FixtureResolver>) -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("veil-tell: {error}");
+            eprintln!("Next / 次: veil-tell --help");
             ExitCode::from(SETUP_FAILURE)
         }
     }

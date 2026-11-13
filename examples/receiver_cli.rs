@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 fn fixture(host: &str) -> Option<SocketAddr> {
-    if host != "allowed.test" {
+    if !matches!(host, "allowed.test" | "new.test") {
         return None;
     }
     let address: SocketAddr = std::env::var("VEIL_TELL_FIXTURE_RECEIVER")

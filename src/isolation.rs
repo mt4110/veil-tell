@@ -154,7 +154,7 @@ pub fn check_isolated_paths(cwd: &Path, policy: Option<&Path>, outputs: &[&Path]
         && policy.canonicalize()?.starts_with(cwd)
     {
         return Err(error(
-            "isolated runs require the policy outside the working directory",
+            "the policy is inside the isolated working directory; move it to a sibling directory, for example ../state/policy.toml",
         ));
     }
     if outputs
@@ -162,7 +162,7 @@ pub fn check_isolated_paths(cwd: &Path, policy: Option<&Path>, outputs: &[&Path]
         .any(|output| output.starts_with(cwd) || cwd.starts_with(output.parent().unwrap()))
     {
         return Err(error(
-            "isolated runs require a separate output directory outside the working directory",
+            "isolated output directory cannot be the working directory, its descendant, or its ancestor; create a sibling directory, for example mkdir -p ../state, then use ../state/report.json / 出力先には作業ディレクトリとその親・配下を指定できません。兄弟ディレクトリの ../state/report.json を使ってください",
         ));
     }
     Ok(())
