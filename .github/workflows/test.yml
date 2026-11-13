@@ -2,12 +2,13 @@ name: Test veil-tell
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, verify/v0.4.0-action]
 permissions:
   contents: read
 jobs:
   receivers:
     strategy:
+      fail-fast: false
       matrix:
         runner: [macos-26, ubuntu-26.04]
     runs-on: ${{ matrix.runner }}
