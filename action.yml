@@ -1,5 +1,5 @@
 name: Check outbound destinations with veil-tell
-description: Compare an isolated command against a reviewed CONNECT baseline
+description: Compare isolated outbound activity against a reviewed baseline
 inputs:
   baseline:
     description: Repository-relative baseline path
@@ -60,7 +60,7 @@ runs:
         printf 'report=%s/report.json\n' "$state" >> "$GITHUB_OUTPUT"
         if [[ -n "$VEIL_PR_BASE" ]]; then
           export VEIL_TELL_PR_BASE_LOCK_DIR="$state"
-          for lockfile in package-lock.json Cargo.lock; do
+          for lockfile in package-lock.json pnpm-lock.yaml yarn.lock bun.lock Cargo.lock; do
             if git cat-file -e "$VEIL_PR_BASE:$lockfile" 2>/dev/null; then
               if ! git show "$VEIL_PR_BASE:$lockfile" > "$state/$lockfile"; then
                 printf '' > "$state/$lockfile"
@@ -86,8 +86,14 @@ runs:
           export PATH="$runtime/bin:$PATH"
         fi
         status=0
-        "$RUNNER_TEMP/veil-tell/bin/veil-tell" ci --attribute-npm --baseline "$state/baseline.json" \
-          --report "$state/report.json" -- /bin/sh -ec "$VEIL_COMMAND" || status=$?
+        cli="$RUNNER_TEMP/veil-tell/bin/veil-tell"
+        if [[ "$VEIL_COMMAND" =~ ^(npm|pnpm|yarn|bun|cargo)([[:space:]][a-zA-Z0-9_./=:-]+)+$ ]]; then
+          read -r -a argv <<< "$VEIL_COMMAND"
+          "$cli" ci --baseline "$state/baseline.json" --report "$state/report.json" -- "${argv[@]}" || status=$?
+        else
+          "$cli" ci --attribute-npm --baseline "$state/baseline.json" \
+            --report "$state/report.json" -- /bin/sh -ec "$VEIL_COMMAND" || status=$?
+        fi
         if [[ -f "$state/report.json" ]]; then
           python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$state/report.json" >> "$GITHUB_STEP_SUMMARY" ||
             echo 'Could not write the job summary. See the JSON report.' >&2

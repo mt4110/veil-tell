@@ -1,4 +1,4 @@
-"""Render the new CONNECT destinations from a veil-tell report as a job summary."""
+"""Render outbound changes from a veil-tell JSON report."""
 
 import html
 import json
@@ -7,41 +7,44 @@ import sys
 
 
 def cell(value):
-    # Keep report text inside its cell, including data supplied by a child.
     text = html.escape(str(value)).replace("|", "&#124;")
     return "<code>" + " ".join(text.splitlines()) + "</code>"
 
 
 def summary(report):
-    added = (report.get("comparison") or {}).get("added", [])
-    if not added:
-        if (report.get("comparison") or {}).get("status") == "compared":
-            print("No new destinations / 新しい送り先はありません")
+    comparison = report.get("comparison") or {}
+    findings = (
+        [("CONNECT", row) for row in comparison.get("added", [])]
+        + [("Attempted DNS", row) for row in comparison.get("attempted_added", [])]
+        + [("Volume anomaly", row) for row in report.get("volume_anomalies", [])]
+    )
+    if not findings:
+        if comparison.get("status") == "compared":
+            print("No new destinations, attempts or volume anomalies / 新しい送り先・試み・送信量の異常はありません")
         else:
             print("Comparison unavailable / 比較できません:", cell(report["run_status"]["reason"]))
         return
-    print("### veil-tell: new CONNECT destinations")
-    print()
+    print("### veil-tell outbound changes\n")
     evidence = {
         (item["host"], item["port"], json.dumps(item["source"], sort_keys=True)): item["label"]
-        for item in report["comparison"].get("lockfile_evidence", [])
+        for item in comparison.get("lockfile_evidence", [])
     }
-    print("| Destination | Package | Lifecycle | Path | Attribution |")
-    print("| --- | --- | --- | --- | --- |")
+    print("| Kind | Destination | Package | Lifecycle | Path | Attribution |")
+    print("| --- | --- | --- | --- | --- | --- |")
     rows = 0
-    for endpoint in added:
+    for kind, endpoint in findings:
         for source in endpoint.get("attribution") or [{"confidence": "unknown"}]:
             if rows >= 100:
                 print("\nAdditional entries are available in the JSON report.")
                 return
             package = source.get("package") or {}
+            host, port = endpoint["host"], endpoint.get("port")
             values = (
-                f'{endpoint["host"]}:{endpoint["port"]}',
+                kind, f"{host}:{port}" if port else host,
                 f'{package["name"]}@{package["version"]}' if package else "—",
-                package.get("script", "—"),
-                package.get("path", "—"),
+                package.get("script", "—"), package.get("path", "—"),
                 " · ".join(filter(None, (source["confidence"], evidence.get((
-                    endpoint["host"], endpoint["port"], json.dumps(source, sort_keys=True)
+                    host, port, json.dumps(source, sort_keys=True)
                 ))))),
             )
             print("| " + " | ".join(map(cell, values)) + " |")

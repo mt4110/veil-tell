@@ -34,3 +34,27 @@ jobs:
           node_bin=$(node -p 'require("node:fs").realpathSync(process.execPath)')
           python3 -B tests/receivers.py target/debug/veil-tell target/debug/examples/receiver_cli "$(dirname "$(dirname "$node_bin")")"
       - run: python3 -B tests/verify.py target/debug/veil-tell target/debug/examples/receiver_cli
+      - name: Dependency manager lifecycle fixtures
+        shell: bash
+        run: |
+          runtime=$(mktemp -d)
+          npm install --prefix "$runtime" --ignore-scripts --no-audit --no-fund \
+            pnpm@10.30.3 @yarnpkg/cli-dist@4.9.4 yarn-classic@npm:yarn@1.22.22
+          case "$(uname -s)/$(uname -m)" in
+            Darwin/arm64) bun_package=bun-darwin-aarch64 ;;
+            Linux/x86_64) bun_package=bun-linux-x64 ;;
+            *) exit 1 ;;
+          esac
+          npm install --prefix "$runtime" --ignore-scripts --no-audit --no-fund "@oven/$bun_package@1.4.4"
+          mkdir -p "$runtime/bin"
+          install -m 755 "$(node -p 'require("node:fs").realpathSync(process.execPath)')" "$runtime/bin/node"
+          ln -s ../node_modules/pnpm/bin/pnpm.cjs "$runtime/bin/pnpm"
+          ln -s ../node_modules/@yarnpkg/cli-dist/bin/yarn.js "$runtime/bin/yarn"
+          ln -s "../node_modules/@oven/$bun_package/bin/bun" "$runtime/bin/bun"
+          python3 -B tests/package_managers.py target/debug/veil-tell \
+            "pnpm=$runtime/bin/pnpm" "yarn=$runtime/bin/yarn" "bun=$runtime/bin/bun"
+          mkdir -p "$runtime/classic"
+          ln -s ../node_modules/yarn-classic/bin/yarn.js "$runtime/classic/yarn"
+          ln -s ../bin/node "$runtime/classic/node"
+          python3 -B tests/package_managers.py target/debug/veil-tell "yarn=$runtime/classic/yarn"
+      - run: python3 -B experiments/dns-attempts/probe.py
