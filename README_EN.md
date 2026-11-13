@@ -4,19 +4,21 @@
 
 Check network destinations **one command at a time**, **without sudo** on supported macOS and Linux systems. veil-tell records HTTP CONNECT requests that reach its local proxy. In restrict mode it can deny unlisted CONNECT requests and **fail a CI job**. veil-tell sends no telemetry of its own.
 
-## Measured demo
+## Can I block this destination?
 
-On macOS 27.2 arm64, `npm install` installed `is-number@7.0.0` from an empty cache. npm fetched the metadata and tarball from the public npm registry. veil-tell recorded one allowed HTTP CONNECT request to `registry.npmjs.org:443`. Both npm and veil-tell exited with code `0`.
+On macOS, we ran Prompt Recipe from the same source and lockfile, changing only the rule for `registry.npmjs.org:443`.
 
-```text
-npm http fetch GET 200 https://registry.npmjs.org/is-number 60ms (cache miss)
-npm http fetch GET 200 https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz 23ms (cache miss)
-veil-tell: registry.npmjs.org:443 allow allow_rule ×1
-```
+| Trial | `veil-tell verify` verdict |
+| --- | --- |
+| `npm ci`, build, and test with a populated cache | **Passes with the destination blocked.** All 19 tests passed in both runs. |
+| `npm audit` with a populated cache | **Fails with the destination blocked.** Allow → block → allow returned `0 → 1 → 0`. |
+| Empty cache, then a timeout or interruption during the blocked run | **Inconclusive.** JSON distinguishes `timed_out` from `interrupted`. |
+
+[Reproduce the Prompt Recipe demo and read the JSON (Japanese)](docs/runbook.md#5-prompt-recipe-で-verify-を再現する)
 
 ## Build and run
 
-Run `cargo install --locked --path .` from the repository. To reproduce the demo, create a fresh working directory and keep the policy and report outside it.
+Run `cargo install --locked --path .` from the repository. The example below allows only the public npm registry to install `is-number@7.0.0`.
 
 Before running the demo, make sure `veil-tell`, Node.js, and npm are on PATH. On Ubuntu, install the official `bubblewrap` package first. To use Ubuntu's `/usr/bin/bwrap` from the Nix development shell, run `unset VEIL_TELL_BWRAP`. [Ubuntu setup](#try-isolation-and-exit-code-20-on-ubuntu)
 

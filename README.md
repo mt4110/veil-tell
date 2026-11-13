@@ -4,19 +4,21 @@
 
 対応する macOS と Linux で **sudo なし**で使える、**コマンド単位**の通信先チェックです。ローカルプロキシに届いた HTTP CONNECT を記録し、制限モードでは未登録の CONNECT を拒否して **CI を失敗**させられます。veil-tell 自体はテレメトリーを送りません。
 
-## 実測デモ
+## 実測デモで通信先を閉じてみる
 
-macOS 27.2 arm64 で、空のキャッシュから `npm install` で `is-number@7.0.0` をインストールしました。公開 npm レジストリからメタデータと tarball を取得し、veil-tell は許可済みの `registry.npmjs.org:443` への HTTP CONNECT を1件記録しました。npm と veil-tell の終了コードはともに `0` でした。
+macOS で Prompt Recipe の同じソースとロックファイルを使い、`registry.npmjs.org:443` の許可だけを切り替えました。
 
-```text
-npm http fetch GET 200 https://registry.npmjs.org/is-number 60ms (cache miss)
-npm http fetch GET 200 https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz 23ms (cache miss)
-veil-tell: registry.npmjs.org:443 allow allow_rule ×1
-```
+| 試したこと | `veil-tell verify` の判定 |
+| --- | --- |
+| 依存キャッシュありで `npm ci`、ビルド、テスト | **閉じても通る**。許可・拒否ともに19テスト成功 |
+| 依存キャッシュありで `npm audit` | **閉じると失敗**。許可 → 拒否 → 再許可で `0 → 1 → 0` |
+| 空のキャッシュで、拒否中に期限切れまたは中断 | **判定不能**。`timed_out` と `interrupted` を JSON で区別 |
+
+[Prompt Recipe での再現手順と JSON の見方](docs/runbook.md#5-prompt-recipe-で-verify-を再現する)
 
 ## ビルドと実行
 
-リポジトリで `cargo install --locked --path .` を実行します。デモを再現するには、新しい作業ディレクトリと、その外側にポリシー・レポートの置き場所を用意します。
+リポジトリで `cargo install --locked --path .` を実行します。以下は、公開 npm レジストリだけを許可して `is-number@7.0.0` を取得する例です。
 
 デモの前に `veil-tell`、Node.js、npm が PATH にあることを確認します。Ubuntu では先に公式の `bubblewrap` を導入します。Nix の開発シェルで Ubuntu 公式の `/usr/bin/bwrap` を使う場合は `unset VEIL_TELL_BWRAP` を実行してください。 [Ubuntu の導入手順](#ubuntu-で隔離と終了コード-20-を試す)
 

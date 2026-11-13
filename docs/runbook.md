@@ -90,6 +90,12 @@ python3 -B tests/macos-ipc.py target/debug/veil-tell
 
 出力の `evidence=` に示されたディレクトリで、対照の送信が Mach、XPC、TCP の受信ログにあり、隔離時の送信が各受信ログにないことを確認します。 `outcomes.json` と `reports/` で終了コードを照合します。JSON の観測対象は HTTP CONNECT で、直接通信や Mach/XPC の試行先は受信ログで判定します。
 
+`verify` の回帰試験は macOS と Ubuntu の両方で実行できます。ローカル受信口を使い、許可・拒否・再許可で届いたデータと JSON の判定を照合します。
+
+```sh
+python3 -B tests/verify.py target/debug/veil-tell target/debug/examples/receiver_cli
+```
+
 ## 4. リリースビルドと配布用 SHA-256
 
 macOS 27.2 arm64 と Ubuntu 26.04.1 LTS x86_64 で、Rust 1.98.1 を使って検証しました。今回の検証では同じ作業ツリーの `Cargo.toml`、`Cargo.lock`、`rust-toolchain.toml`、`LICENSE`、`src/` を両ホストにそろえました。公開用のビルドでは、両ホストで同じリリースタグをチェックアウトし、`version` をそのタグの Cargo パッケージバージョンに合わせます。
@@ -211,3 +217,139 @@ gh run download RUN_ID --repo mt4110/veil-tell --name veil-tell-distribution
 ```
 
 両ファイルで終了コード `0` を確認してから、使う OS のアーカイブを展開します。展開後の実行ファイルだけを検証する場合は、同じオプションでアーカイブの代わりに `veil-tell` のパスを指定できます。 [GitHub CLI の検証オプション](https://cli.github.com/manual/gh_attestation_verify)
+
+## 5. Prompt Recipe で verify を再現する
+
+macOS 27.2 arm64、Node.js 26.9.0、npm 11.19.1 で、Prompt Recipe のコミット `78f2beb` を使った実測です。`registry.npmjs.org:443` を許可するポリシーを基準に、`verify` が試行内でその1件を拒否します。使用するバイナリは、このソースから第1節の手順でビルドしてください。
+
+### 同じソースとキャッシュを用意する
+
+以下は Bash で実行します。第1節のビルド後、veil-tell のルートで実行してください。試験用ディレクトリに固定コミットのソースを展開し、キャッシュの準備には別のコピーを使います。
+
+```bash
+veil="$PWD/target/debug/veil-tell"
+demo=$(mktemp -d /tmp/veil-tell-prompt-recipe.XXXXXX)
+commit=78f2bebf7af065d263d3d53119cc7118dcf8722b
+git clone --quiet https://github.com/mt4110/prompt-recipe.git "$demo/repo"
+mkdir "$demo/cold" "$demo/state"
+git -C "$demo/repo" archive --output="$demo/source.tar" "$commit"
+tar -xf "$demo/source.tar" -C "$demo/cold"
+touch "$demo/cold/.comparison-user.npmrc" "$demo/cold/.comparison-global.npmrc"
+
+cat > "$demo/state/allow.toml" <<'TOML'
+version = 1
+profile = "npm"
+[[rule]]
+action = "allow"
+host = "registry.npmjs.org"
+port = 443
+TOML
+
+cat > "$demo/cold/check.sh" <<'SH'
+#!/bin/sh
+set -eu
+export npm_config_cache=./.comparison-cache
+export npm_config_userconfig=./.comparison-user.npmrc
+export npm_config_globalconfig=./.comparison-global.npmrc
+export npm_config_fetch_retries=0
+export npm_config_fetch_timeout=5000
+export npm_config_maxsockets=1
+export npm_config_update_notifier=false
+export npm_config_fund=false
+export npm_config_audit=true
+
+step() {
+  printf '\n>>> npm %s\n' "$*"
+  npm "$@"
+}
+
+test ! -e node_modules
+case "$1" in
+  seed) step ci ;;
+  workflow) step ci; step run build; step test ;;
+  audit) step audit ;;
+  *) exit 64 ;;
+esac
+SH
+
+cp -R "$demo/cold" "$demo/prime"
+(cd "$demo/prime" && "$veil" restrict --backend isolated \
+  --policy "$demo/state/allow.toml" --report "$demo/state/prime.json" -- \
+  /bin/sh ./check.sh seed)
+cp -R "$demo/cold" "$demo/warm"
+mkdir "$demo/warm/.comparison-cache"
+cp -R "$demo/prime/.comparison-cache/_cacache" "$demo/warm/.comparison-cache/"
+cmp "$demo/cold/package-lock.json" "$demo/warm/package-lock.json"
+shasum -a 256 "$demo/cold/package-lock.json"
+printf 'Reports and logs: %s/state\n' "$demo"
+```
+
+キャッシュ準備の `npm ci` が成功してから比較に進みます。`warm` に移すのは npm の `_cacache` だけです。どちらのソースにも `node_modules` がない状態から始めます。
+
+### 許可と拒否を比較する
+
+同じ Bash で実行します。関数は実行ログ、JSON、CLI の終了コードを `state/` に保存します。同じ試行をやり直すときは、関数の第1引数に新しい名前を指定します。
+
+```bash
+trial() {
+  local name=$1 seed=$2 seconds=$3 check=$4 code=0
+  if [ -e "$demo/state/$name.json" ] || [ -e "$demo/state/$name.exit" ]; then
+    printf 'Choose a new trial name: %s\n' "$name" >&2
+    return 1
+  fi
+  "$veil" verify --source "$demo/$seed" --policy "$demo/state/allow.toml" \
+    --without registry.npmjs.org:443 --report "$demo/state/$name.json" \
+    --timeout-seconds "$seconds" -- /bin/sh ./check.sh "$check" \
+    > "$demo/state/$name.log" 2>&1 || code=$?
+  printf '%s\n' "$code" > "$demo/state/$name.exit"
+  tail -n 5 "$demo/state/$name.log"
+}
+
+trial warm-workflow warm 30 workflow
+trial warm-audit warm 30 audit
+trial cold-timeout cold 12 workflow
+```
+
+中断を再現する場合は、以下を端末のフォアグラウンドで実行します。`veil-tell verify: denied` に続いて `>>> npm ci` が出たら Ctrl-C を押します。
+
+```bash
+"$veil" verify --source "$demo/cold" --policy "$demo/state/allow.toml" \
+  --without registry.npmjs.org:443 --report "$demo/state/cold-interrupt.json" \
+  --timeout-seconds 20 -- /bin/sh ./check.sh workflow
+printf 'verify exit: %s\n' "$?"
+```
+
+実測では、キャッシュありのビルド・テストは許可と拒否の両方で19件成功しました。レジストリへの CONNECT を拒否した試行でも、キャッシュからの `npm ci` は成功しました。独立した `npm audit` は拒否時に `403` で失敗し、再許可すると成功しました。公開レジストリの脆弱性情報が更新されると、許可側の監査結果も変わり得ます。
+
+空キャッシュの12秒はこの環境で使った期限です。許可側が先に期限に達する場合は、`phase` で確認し、各試行に同じ長めの期限を設定してください。
+
+### JSON と終了コードを照合する
+
+`jq` があれば、判定と各試行の終了コード、観測した CONNECT をまとめて確認できます。
+
+```bash
+jq '{
+  verdict, reason, phase, exit_code,
+  trials: (.trials | map_values(
+    if . == null or has("error") then . else
+      {child_status, run_status, coverage,
+       destinations: [.destinations[] |
+         {host, port, reason, result, attempts, sent_bytes, received_bytes}]}
+    end
+  ))
+}' "$demo/state/warm-workflow.json" "$demo/state/warm-audit.json" \
+   "$demo/state/cold-timeout.json" "$demo/state/cold-interrupt.json"
+```
+
+| 実測 | `verdict` / `reason` | CLI の終了コード | 試行の確認箇所 |
+| --- | --- | --- | --- |
+| キャッシュありのビルド・テスト | `passes` / `passed_with_destination_blocked` | `0` | 許可・拒否ともに子が `0`。拒否側は `explicit_deny`、`blocked`、送受信ともに0バイト |
+| キャッシュありの監査 | `fails` / `failed_with_destination_blocked` | `1` | 許可・拒否・再許可の子が `0 → 1 → 0`。拒否側は `child_failed` |
+| 空キャッシュで拒否中に期限切れ | `inconclusive` / `timed_out` | `2` | 拒否試行の `run_status.exit_code` は `124` |
+| 空キャッシュで拒否中に Ctrl-C | `inconclusive` / `interrupted` | `130` | 拒否試行の `run_status.exit_code` は `130` |
+
+トップレベルの `phase` は判定を確定した試行です。`trials.allowed`、`trials.denied`、`trials.restored` で、それぞれの `child_status` と `run_status` を照合します。実行しなかった試行は `null`、試行の準備に失敗した場合は `error` に詳細が入ります。期限切れと中断の `coverage.proxy_capture` は `until_interrupted` です。SIGTERM による中断では CLI は `143` を返します。
+
+`--timeout-seconds` は各試行のコマンド起動後に適用され、既定は300秒です。不正な引数やポリシーなどで比較を開始できない場合は `125` を返します。ポリシーとレポートは `--source` の外に置き、レポートには一時ディレクトリのルートを含まない専用のディレクトリを使います。Linux で内部中継の失敗やシグナルと区別できない子の終了コード `125`・`128` 以上は、`child_exit_ambiguous` で判定不能になります。
+
+判定の対象は、指定したコマンド、開始時のキャッシュ、プロキシが観測した HTTP CONNECT です。信頼できるコマンドをプロジェクト相対パスで指定してください。外部サービスやスナップショット外のキャッシュは試行間で変わり得ます。
