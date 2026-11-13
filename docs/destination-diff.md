@@ -88,12 +88,17 @@ permissions:
   contents: read
 jobs:
   destinations:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - run: |
+          if ! test -x /usr/bin/bwrap; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
       - uses: mt4110/veil-tell@v0
         id: veil
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

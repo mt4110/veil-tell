@@ -9,7 +9,7 @@ jobs:
   receivers:
     strategy:
       matrix:
-        runner: [macos-26, ubuntu-latest]
+        runner: [macos-26, ubuntu-26.04]
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -19,6 +19,14 @@ jobs:
         with:
           node-version: '26.13.0'
           package-manager-cache: false
+      - name: Install Ubuntu bubblewrap
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if [[ ! -x /usr/bin/bwrap ]]; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
       - run: cargo test --locked
       - run: cargo build --locked --bins --examples
       - name: Receiver and npm postinstall tests

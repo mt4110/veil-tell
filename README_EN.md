@@ -19,12 +19,17 @@ permissions:
   contents: read
 jobs:
   destinations:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
+      - run: |
+          if ! test -x /usr/bin/bwrap; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
       - uses: mt4110/veil-tell@v0
 ```
 
