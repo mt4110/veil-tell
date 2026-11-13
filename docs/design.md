@@ -265,3 +265,28 @@ v1 は完全一致を維持する。実際に頻繁な宛先変更が確認さ�
 配布はタグから OS・アーキテクチャ別にビルドし、配布する各ファイルに SHA-256 を掲載する。バイナリは GitHub Artifact Attestations の署名付き来歴証明の対象にし、利用者がリポジトリを指定して `gh attestation verify` で検証できる手順を載せる。配布ページから取得したファイルでチェックサムと来歴を確認する。Apple の署名・公証は macOS の配布形式に応じて別途判断する。[GitHub Artifact Attestations](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)
 
 最初の作業は、実測デモ・観測範囲・弱点の日英 README への反映と、端末出力の明示。次に完全一致のポリシーひな形を試し、公開に向けてライセンス、報告先、回帰手順、配布物の検証を整える。Apple `container` は小さな実験で隔離境界を確かめ、ワイルドカードは実測で必要になった時点で判断する。
+
+## v0.3.0 宛先の差分チェック
+
+| 優先度 | 対象 |
+| --- | --- |
+| P0 | 一行の初回記録・再比較、明示的な承認、安定した JSON、CI の新規宛先判定（1・2・3・5・6・7） |
+| P1 | 依存更新 PR 向けの GitHub Actions サンプル（4） |
+
+`veil-tell COMMAND [ARG...]` はカレントディレクトリの `.veil-tell/` に、引数列の SHA-256 ごとに基準を置く。引数は長さ付きでハッシュ化し、ファイルに引数そのものは残さない。初回の成功時だけ新規作成する。2回目以降は同じ基準と比較し、変更があれば最新の承認候補を `pending.json` に書く。`veil-tell accept` が候補の差分を基準に反映する。候補はプロジェクトごとに1件なので、承認前に表示された宛先を確認する。基準が候補生成後に変わった場合は再観測を求める。基準は Git 管理し、`pending.json` は除外する。
+
+上級者向けの `observe --baseline-out FILE` と `observe --baseline FILE` は同時指定不可。出力は新規ファイルに限り、既存ファイルを保持する。隔離を指定する場合は既存の出力先規則が適用される。たとえば `project/` と同じ階層に `state/` を作り、`../state/baseline.json` を使う。既定の `.veil-tell/` は短縮形のローカル観測で書く。隔離した CI では実行前に基準を読み込み、メモリに保持する。
+
+基準 JSON の `schema_version: 1` は実行レポートと独立して管理する。`coverage: "http_connect_requests"`、`backend` と、ホスト・ポート順に固定した `destinations: [{host, port, attempts}]` を保存する。時刻、実行パス、解決先 IP、転送量は入れない。ホスト名は CONNECT と同じ正規化を使い、接続結果や IP が違っても回数を合計する。壊れたファイル・未知バージョンは実行前に `125` で停止する。
+
+新規宛先は `+`、消えた宛先は `-`、同じ宛先の CONNECT 回数が **2倍以上かつ3回以上増減**した場合は `~` で表示する。消失と回数変化は情報として表示する。新規宛先があれば `observe --fail-on-new` は終了コード `21` を返す。観測時は新規接続が実行中に成立し得る。`ci -- COMMAND` は隔離し、事前に読み込んだ基準にない新規 CONNECT を接続前に拒否する。基準がない場合は起動せず `125`。子が新規拒否に伴って非ゼロ終了した場合も、観測が完了していれば新規宛先を記録して `21`。この場合、消失と回数変化は判定しない。従来の `0`、`20`、`125` の意味と通常の子終了コードの引き継ぎは維持する。子が自ら `21` を返した場合はレポートの `run_status.reason` で区別できる。
+
+実行レポートは v1 のまま、差分を要求した場合に限り `comparison` を追加する。状態は `created`、`compared`、`skipped`、`new_destinations_only` のいずれか。中断・観測不完全・通常の子プロセス失敗は基準を保存せず、比較を見送る。実行方式が変わった場合は警告を表示する。旧コマンドのレポートに新規フィールドは出力しない。
+
+CONNECT で判別できる単位は正規化したホスト名と443番ポート。TLS の内容や同一ホスト内の用途変化、プロキシを通らない直接通信の宛先は観測範囲外。CDN のホスト名が変わると新規宛先になるため、OS・npm・キャッシュ条件を揃えて再測定し、必要性を確認してから基準を承認する。依存更新 PR ではベース側のコミットからレビュー済み基準を取り出す。必須チェックとして運用する場合は、ジョブや Action 自体も PR から書き換えられない設定で管理する。
+
+| 先行例 | 重なる範囲と veil-tell の設計 |
+| --- | --- |
+| Anthropic Sandbox Runtime | OS 隔離とネットワーク許可リストが重なる。veil-tell では任意コマンドの実測を Git でレビューできる基準にし、次回の差分を出す。[公式実装](https://github.com/anthropics/sandbox-runtime) |
+| Socket.dev | 依存更新で追加されるインストールスクリプトやネットワーク利用を PR に報告する点が近い。Socket の依存分析に対して、veil-tell は実行時に観測した CONNECT を比較する。[Socket for GitHub](https://docs.socket.dev/docs/socket-for-github) |
+| StepSecurity Harden-Runner | CI の外向き通信を観測し、履歴ベースの異常検知と許可リストによる制限を提供するため、目的が最も近い。veil-tell の対象は個々のコマンドで、基準は利用者がローカルで生成・レビューする。[StepSecurity Baseline](https://docs.stepsecurity.io/gitlab/harden-runner/baseline) · [Harden-Runner](https://github.com/step-security/harden-runner) |

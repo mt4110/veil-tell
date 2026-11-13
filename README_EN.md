@@ -4,6 +4,16 @@
 
 Check network destinations **one command at a time**, **without sudo** on supported macOS and Linux systems. veil-tell records HTTP CONNECT requests that reach its local proxy. In restrict mode it can deny unlisted CONNECT requests and **fail a CI job**. veil-tell sends no telemetry of its own.
 
+## Compare npm destinations in two runs
+
+```sh
+cargo install --locked --path .
+```
+
+In an npm project, run `veil-tell npm install` twice. The first successful run saves a baseline in `.veil-tell/`. The second shows new and removed destinations and large changes in request counts. Review the changes, then run `veil-tell accept` to approve them. Commit `baseline-*.json` if you want to share it, and keep the pending review file `pending.json` local.
+
+For CI, run `veil-tell npm ci` locally, commit the baseline, and run `veil-tell ci -- npm ci`. CI enables isolation, blocks new CONNECT destinations before dialing them, and exits with code `21`. Capture covers HTTP CONNECT requests that reach the local proxy. Direct connection destinations and TLS contents are outside that scope. [Dependency update PR example and reproducible demo](docs/destination-diff.md)
+
 ## Can I block this destination?
 
 On macOS, we ran Prompt Recipe from the same source and lockfile, changing only the rule for `registry.npmjs.org:443`.
@@ -57,7 +67,7 @@ Use `veil-tell COMMAND` to inspect destinations. Use `veil-tell observe --backen
 
 With `--fail-on-unknown`, veil-tell denies unlisted CONNECT requests and exits with code `20` even if the child handles the error and exits with code `0`. An explicit deny blocks the tunnel without triggering exit code 20. Setup and capture errors use exit code `125`.
 
-Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. Each recorded CONNECT host and port appears once as a commented candidate pending review. The draft contains zero active rules. If passed directly to `restrict --fail-on-unknown`, its candidates are denied as unlisted. Uncomment only the candidates you have reviewed. The draft is written after a successful command with uninterrupted and complete capture. Existing files are protected from overwrite. With isolation, place the output outside the working directory.
+Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. Each recorded CONNECT host and port appears once as a commented candidate pending review. The draft contains zero active rules. If passed directly to `restrict --fail-on-unknown`, its candidates are denied as unlisted. Uncomment only the candidates you have reviewed. The draft is written after a successful command with uninterrupted and complete capture. Existing files are protected from overwrite. With isolation, use a sibling directory such as `../state/report.json`. The output directory must be separate from the working directory and its descendants and ancestors.
 
 ## Capture scope and known limitations
 

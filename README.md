@@ -4,6 +4,16 @@
 
 対応する macOS と Linux で **sudo なし**で使える、**コマンド単位**の通信先チェックです。ローカルプロキシに届いた HTTP CONNECT を記録し、制限モードでは未登録の CONNECT を拒否して **CI を失敗**させられます。veil-tell 自体はテレメトリーを送りません。
 
+## npm の宛先を2回の実行で比べる
+
+```sh
+cargo install --locked --path .
+```
+
+npm プロジェクトで `veil-tell npm install` を2回実行します。初回は成功した実行の基準をプロジェクトの `.veil-tell/` に保存し、次回は追加・消失・大きな回数変化を表示します。差分を調べ、受け入れる場合は `veil-tell accept` を実行します。`baseline-*.json` は Git に追加でき、`pending.json` は承認待ちの作業用ファイルです。
+
+CI では、同じ引数で作成した基準をコミットして `veil-tell ci -- npm ci` を実行します。隔離を有効にし、基準にない CONNECT を接続前に拒否して終了コード `21` を返します。基準の作成はローカルで `veil-tell npm ci` を実行して行います。観測範囲はローカルプロキシに届いた HTTP CONNECT で、直接通信の試行先と TLS の内容は範囲外です。 [依存更新 PR の設定・再現デモ](docs/destination-diff.md)
+
 ## 実測デモで通信先を閉じてみる
 
 macOS で Prompt Recipe の同じソースとロックファイルを使い、`registry.npmjs.org:443` の許可だけを切り替えました。
@@ -57,7 +67,7 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 
 `--fail-on-unknown` は未登録の CONNECT を拒否し、子がエラーを握り潰して終了コード `0` を返しても、veil-tell は `20` を返します。明示拒否はトンネルを遮断し、このフラグによる終了コードの変更は発生しません。セットアップや記録のエラーでは `125` を返します。
 
-`veil-tell observe --emit-policy FILE -- COMMAND` は、記録した CONNECT のホスト名とポートを重複なく並べ、全候補をコメント付きの保留として保存します。生成直後の TOML は有効なルールがゼロなので、そのまま `restrict --fail-on-unknown` に渡すと候補も未登録として拒否されます。レビュー済みの候補だけコメントを外してください。観測が中断・不完全だった場合やコマンドが失敗した場合は出力しません。既存ファイルは上書きせず、隔離時は作業ディレクトリの外に出力します。
+`veil-tell observe --emit-policy FILE -- COMMAND` は、記録した CONNECT のホスト名とポートを重複なく並べ、全候補をコメント付きの保留として保存します。生成直後の TOML は有効なルールがゼロなので、そのまま `restrict --fail-on-unknown` に渡すと候補も未登録として拒否されます。レビュー済みの候補だけコメントを外してください。観測が中断・不完全だった場合やコマンドが失敗した場合は出力しません。既存ファイルは上書きせず、隔離時は `../state/report.json` のように、作業ディレクトリと同じ階層の別ディレクトリに出力します。作業ディレクトリ自体・その配下・その親階層は出力先ディレクトリに指定できません。
 
 ## 観測範囲と既知の弱点
 
