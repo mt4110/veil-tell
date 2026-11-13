@@ -25,19 +25,35 @@ pub async fn prepare(
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] outputs: &[&Path],
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] protected_dirs: &[&Path],
     secret: &str,
-    attribute_npm: bool,
+    (attribute_npm, attribute_cargo): (bool, bool),
 ) -> Result<Launch> {
     #[cfg(target_os = "linux")]
     if backend == Backend::Isolated {
-        return linux::prepare(command, cwd, secret, attribute_npm).await;
+        return linux::prepare(command, cwd, secret, attribute_npm, attribute_cargo).await;
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let wrapper = attribute_npm.then(tempfile::tempdir).transpose()?;
-    let shell = wrapper.as_ref().map(|dir| dir.path().join("npm-shell"));
+    let wrapper = (attribute_npm || attribute_cargo)
+        .then(tempfile::tempdir)
+        .transpose()?;
+    let shell = wrapper
+        .as_ref()
+        .filter(|_| attribute_npm)
+        .map(|dir| dir.path().join("npm-shell"));
     if let Some(path) = &shell {
         crate::attribution::create_shell(path, &std::env::current_exe()?)?;
+    }
+    let rustc = wrapper
+        .as_ref()
+        .filter(|_| attribute_cargo)
+        .map(|dir| dir.path().join("rustc-wrapper"));
+    if let Some(path) = &rustc {
+        crate::attribution::create_wrapper(
+            path,
+            &std::env::current_exe()?,
+            crate::cargo_attribution::RUSTC_MODE,
+        )?;
     }
     let (mut launch, temporary) = if backend == Backend::Isolated {
         #[cfg(target_os = "macos")]
@@ -79,6 +95,9 @@ pub async fn prepare(
     set_proxy(&mut launch, port, secret);
     if let Some(shell) = &shell {
         crate::attribution::configure(&mut launch, shell, cwd);
+    }
+    if let Some(rustc) = &rustc {
+        crate::cargo_attribution::configure(&mut launch, rustc, cwd);
     }
     supervise_stdio(&mut launch);
     Ok(Launch {

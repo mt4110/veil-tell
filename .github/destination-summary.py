@@ -19,6 +19,10 @@ def summary(report):
     if not added:
         print("No new CONNECT destinations recorded. Result:", cell(report["run_status"]["reason"]))
         return
+    evidence = {
+        (item["host"], item["port"], json.dumps(item["source"], sort_keys=True)): item["label"]
+        for item in report["comparison"].get("lockfile_evidence", [])
+    }
     print("| Destination | Package | Lifecycle | Path | Attribution |")
     print("| --- | --- | --- | --- | --- |")
     rows = 0
@@ -33,7 +37,9 @@ def summary(report):
                 f'{package["name"]}@{package["version"]}' if package else "—",
                 package.get("script", "—"),
                 package.get("path", "—"),
-                source["confidence"],
+                " · ".join(filter(None, (source["confidence"], evidence.get((
+                    endpoint["host"], endpoint["port"], json.dumps(source, sort_keys=True)
+                ))))),
             )
             print("| " + " | ".join(map(cell, values)) + " |")
             rows += 1

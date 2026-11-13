@@ -38,6 +38,15 @@ runs:
         state=$(mktemp -d "$RUNNER_TEMP/veil-tell-state.XXXXXX")
         printf 'report=%s/report.json\n' "$state" >> "$GITHUB_OUTPUT"
         if [[ -n "$VEIL_PR_BASE" ]]; then
+          export VEIL_TELL_PR_BASE_LOCK_DIR="$state"
+          for lockfile in package-lock.json Cargo.lock; do
+            if git cat-file -e "$VEIL_PR_BASE:$lockfile" 2>/dev/null; then
+              if ! git show "$VEIL_PR_BASE:$lockfile" > "$state/$lockfile"; then
+                printf '' > "$state/$lockfile"
+                echo "Lockfile evidence unavailable for $lockfile." >&2
+              fi
+            fi
+          done
           git show "$VEIL_PR_BASE:$VEIL_BASELINE" > "$state/baseline.json" || {
             echo 'Cannot read the baseline from the PR base commit. Check fetch-depth and commit the reviewed baseline first.' >&2
             exit 125

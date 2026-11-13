@@ -92,7 +92,7 @@ fn identifier(s: &str, max: usize, punctuation: &[u8]) -> bool {
 }
 
 impl Package {
-    fn valid(&self) -> bool {
+    pub fn valid(&self) -> bool {
         identifier(&self.name, 214, b"@/_.-")
             && identifier(&self.version, 80, b".-+")
             && identifier(&self.script, 64, b"_.:-")
@@ -106,14 +106,19 @@ impl Package {
 }
 
 pub fn create_shell(path: &Path, binary: &Path) -> Result<()> {
-    let binary = binary
+    create_wrapper(path, binary, WRAPPER_MODE)
+}
+
+pub fn shell_quote(path: &Path) -> Result<String> {
+    let path = path
         .to_str()
-        .ok_or_else(|| error("npm attribution requires a UTF-8 executable path"))?;
-    let quoted = binary.replace('\'', "'\"'\"'");
-    fs::write(
-        path,
-        format!("#!/bin/sh\nexec '{quoted}' {WRAPPER_MODE} \"$@\"\n"),
-    )?;
+        .ok_or_else(|| error("attribution requires a UTF-8 executable path"))?;
+    Ok(format!("'{}'", path.replace('\'', "'\"'\"'")))
+}
+
+pub fn create_wrapper(path: &Path, binary: &Path, mode: &str) -> Result<()> {
+    let binary = shell_quote(binary)?;
+    fs::write(path, format!("#!/bin/sh\nexec {binary} {mode} \"$@\"\n"))?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     Ok(())
 }
@@ -140,19 +145,7 @@ fn identify(args: &[OsString]) -> Option<Package> {
     if claimed != manifest {
         return None;
     }
-    let file = OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
-        .open(manifest)
-        .ok()?;
-    if !file.metadata().ok()?.is_file() {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    file.take(MAX_MANIFEST + 1).read_to_end(&mut bytes).ok()?;
-    if bytes.len() as u64 > MAX_MANIFEST {
-        return None;
-    }
+    let bytes = read_manifest(&manifest)?;
     let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let name = manifest["name"].as_str()?;
     let version = manifest["version"].as_str()?;
@@ -179,10 +172,32 @@ fn identify(args: &[OsString]) -> Option<Package> {
     package.valid().then_some(package)
 }
 
+pub fn read_manifest(path: &Path) -> Option<Vec<u8>> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_MANIFEST + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > MAX_MANIFEST {
+        return None;
+    }
+    Some(bytes)
+}
+
 pub fn run_shell(args: &[OsString]) -> Result<u8> {
     let mut shell = std::process::Command::new("/bin/sh");
     shell.args(args);
-    let payload = identify(args).and_then(|package| serde_json::to_vec(&package).ok());
+    annotate(&mut shell, identify(args));
+    Err(shell.exec().into())
+}
+
+pub fn annotate(shell: &mut std::process::Command, package: Option<Package>) {
+    let payload = package.and_then(|package| serde_json::to_vec(&package).ok());
     for key in crate::isolation::PROXY_VARS {
         if let Ok(value) = std::env::var(key)
             && let Some((login, address)) = value.split_once('@')
@@ -197,5 +212,4 @@ pub fn run_shell(args: &[OsString]) -> Result<u8> {
             shell.env(key, format!("http://veil:{secret}{suffix}@{address}"));
         }
     }
-    Err(shell.exec().into())
 }

@@ -1,7 +1,9 @@
 mod attribution;
 mod baseline;
+mod cargo_attribution;
 mod cli;
 mod isolation;
+mod lockfile;
 mod policy;
 mod proxy;
 mod report;
@@ -145,6 +147,11 @@ async fn run_command(
             && Path::new(&options.command[0])
                 .file_name()
                 .is_some_and(|name| name == "npm"));
+    let attribute_cargo = options.comparison.requested()
+        && Path::new(&options.command[0])
+            .file_name()
+            .is_some_and(|name| name == "cargo")
+        && std::env::var_os("RUSTC_WRAPPER").is_none();
     let proxy = Arc::new(proxy::Proxy {
         mode: options.mode,
         policy,
@@ -162,7 +169,7 @@ async fn run_command(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(format!("veil:{secret}"))
         ),
-        attribute_npm,
+        attribute_npm: attribute_npm || attribute_cargo,
         records: report::Records::default(),
         incomplete: AtomicBool::new(false),
         interfaces: proxy::host_interfaces()?,
@@ -180,7 +187,7 @@ async fn run_command(
         &outputs,
         protected_dirs,
         &secret,
-        attribute_npm,
+        (attribute_npm, attribute_cargo),
     )
     .await?;
     let (stop, stopped) = oneshot::channel();
@@ -353,6 +360,23 @@ async fn run_command(
         file.save_report(&result)?;
     }
     if let Some(diff) = &result.comparison {
+        if diff.created() && attribute_cargo {
+            for destination in &result.destinations {
+                for source in &destination.attribution {
+                    if let Some(pkg) = &source.package {
+                        eprintln!(
+                            "  {}:{} ← {}@{} {} ({}) [inferred / 推定]",
+                            destination.host,
+                            destination.port,
+                            pkg.name,
+                            pkg.version,
+                            pkg.script,
+                            pkg.path
+                        );
+                    }
+                }
+            }
+        }
         diff.display(options.comparison.automatic);
     }
     Ok(result)
@@ -403,13 +427,26 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
 pub fn entry(fixture: Option<FixtureResolver>) -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = (|| {
-        isolation::mark_inherited_fds()?;
         if args
             .first()
             .is_some_and(|arg| arg == attribution::WRAPPER_MODE)
         {
+            isolation::mark_inherited_fds()?;
             return attribution::run_shell(&args[1..]);
         }
+        if args
+            .first()
+            .is_some_and(|arg| arg == cargo_attribution::RUSTC_MODE)
+        {
+            return cargo_attribution::rustc(&args[1..]);
+        }
+        if args
+            .first()
+            .is_some_and(|arg| arg == cargo_attribution::BUILD_MODE)
+        {
+            return cargo_attribution::run_build(&args[1..]);
+        }
+        isolation::mark_inherited_fds()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()

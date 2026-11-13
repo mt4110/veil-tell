@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 pub const NEW_DESTINATION: u8 = 21;
 const MAX_BYTES: u64 = 1024 * 1024;
+const MAX_PENDING_BYTES: u64 = 3 * MAX_BYTES;
 const CAPTURE: &str = "http_connect_requests";
 
 #[derive(Default)]
@@ -51,6 +52,12 @@ struct Baseline {
     schema_version: u8,
     coverage: String,
     backend: Backend,
+    #[serde(
+        default,
+        deserialize_with = "crate::lockfile::optional_summary",
+        skip_serializing_if = "Option::is_none"
+    )]
+    lockfile: Option<crate::lockfile::Summary>,
     destinations: Vec<Endpoint>,
 }
 
@@ -75,6 +82,7 @@ impl Baseline {
             schema_version: 1,
             coverage: CAPTURE.into(),
             backend,
+            lockfile: None,
             destinations: counts.into_values().collect(),
         }
     }
@@ -134,6 +142,31 @@ impl Baseline {
                 _ => {}
             }
         }
+        if let Some((changes, summary)) = self
+            .lockfile
+            .as_ref()
+            .zip(current.lockfile.as_ref())
+            .and_then(|(old, new)| Some((old.compare(new)?, new)))
+        {
+            for endpoint in &diff.added {
+                let unknown = crate::attribution::Attribution::unknown();
+                let sources = endpoint
+                    .attribution
+                    .iter()
+                    .chain(endpoint.attribution.is_empty().then_some(&unknown));
+                for source in sources {
+                    if let Some(evidence) = changes.label(source.package.as_ref(), summary) {
+                        diff.lockfile_evidence.push(LockEvidence {
+                            host: endpoint.host.clone(),
+                            port: endpoint.port,
+                            source: source.clone(),
+                            evidence,
+                        });
+                    }
+                }
+            }
+            diff.lockfile_changes = Some(changes);
+        }
         diff.removed.extend(
             self.destinations
                 .iter()
@@ -153,8 +186,21 @@ struct CountChange {
 }
 
 #[derive(Serialize)]
+struct LockEvidence {
+    host: String,
+    port: u16,
+    source: crate::attribution::Attribution,
+    #[serde(flatten)]
+    evidence: crate::lockfile::Evidence,
+}
+
+#[derive(Serialize)]
 pub struct Comparison {
     status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lockfile_changes: Option<crate::lockfile::Changes>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    lockfile_evidence: Vec<LockEvidence>,
     backend_changed: bool,
     added: Vec<Endpoint>,
     removed: Vec<Endpoint>,
@@ -165,6 +211,8 @@ impl Comparison {
     fn new(status: &'static str) -> Self {
         Self {
             status,
+            lockfile_changes: None,
+            lockfile_evidence: vec![],
             backend_changed: false,
             added: vec![],
             removed: vec![],
@@ -179,6 +227,10 @@ impl Comparison {
         self.status = "new_destinations_only";
         self.removed.clear();
         self.count_changes.clear();
+    }
+
+    pub fn created(&self) -> bool {
+        self.status == "created"
     }
 
     pub fn has_new(&self) -> bool {
@@ -207,14 +259,31 @@ impl Comparison {
         }
         for e in &self.added {
             eprintln!("  + {}:{} ({})", e.host, e.port, e.attempts);
-            for source in &e.attribution {
+            let unknown = crate::attribution::Attribution::unknown();
+            for source in e.attribution.iter().chain(
+                (e.attribution.is_empty()
+                    && self
+                        .lockfile_evidence
+                        .iter()
+                        .any(|x| x.host == e.host && x.port == e.port))
+                .then_some(&unknown),
+            ) {
+                let suffix = self
+                    .lockfile_evidence
+                    .iter()
+                    .find(|x| x.host == e.host && x.port == e.port && x.source == *source)
+                    .map(|x| format!(", {}", x.evidence.label))
+                    .unwrap_or_default();
                 if let Some(pkg) = &source.package {
                     eprintln!(
-                        "    {}:{} ← {}@{} {} ({}) [inferred / 推定]",
+                        "    {}:{} ← {}@{} {} ({}) [inferred / 推定{suffix}]",
                         e.host, e.port, pkg.name, pkg.version, pkg.script, pkg.path
                     );
                 } else {
-                    eprintln!("    {}:{} ← unknown / 特定できません", e.host, e.port);
+                    eprintln!(
+                        "    {}:{} ← unknown / 特定できません{suffix}",
+                        e.host, e.port
+                    );
                 }
             }
         }
@@ -237,7 +306,7 @@ impl Comparison {
     }
 }
 
-fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
+fn read<T: DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
     let mut bytes = Vec::new();
     let file = fs::OpenOptions::new()
         .read(true)
@@ -248,10 +317,10 @@ fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
             "use a regular file for the baseline or pending review",
         ));
     }
-    file.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_BYTES {
+    file.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
         return Err(error(
-            "baseline or pending review exceeds 1 MiB; use a smaller capture",
+            "baseline or pending review exceeds its size limit; use a smaller capture",
         ));
     }
     serde_json::from_slice(&bytes).map_err(|e| {
@@ -263,7 +332,7 @@ fn read<T: DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 fn baseline(path: &Path) -> Result<Baseline> {
-    let value: Baseline = read(path)?;
+    let value: Baseline = read(path, MAX_BYTES)?;
     value.validate()?;
     Ok(value)
 }
@@ -276,21 +345,21 @@ fn optional_baseline(path: &Path) -> Result<Option<Baseline>> {
     }
 }
 
-fn write_json(file: &mut File, value: &impl Serialize) -> Result<()> {
+fn write_json(file: &mut File, value: &impl Serialize, limit: u64) -> Result<()> {
     let mut bytes = serde_json::to_vec_pretty(value)?;
     bytes.push(b'\n');
-    if bytes.len() as u64 > MAX_BYTES {
+    if bytes.len() as u64 > limit {
         return Err(error(
-            "baseline or pending review exceeds 1 MiB; use a smaller capture",
+            "baseline or pending review exceeds its size limit; use a smaller capture",
         ));
     }
     file.write_all(&bytes)?;
     Ok(())
 }
 
-fn replace(path: &Path, value: &impl Serialize) -> Result<()> {
+fn replace(path: &Path, value: &impl Serialize, limit: u64) -> Result<()> {
     let mut temp = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-    write_json(temp.as_file_mut(), value)?;
+    write_json(temp.as_file_mut(), value, limit)?;
     temp.as_file().sync_all()?;
     temp.persist(path)?;
     Ok(())
@@ -337,6 +406,10 @@ pub struct Session {
     before: Option<Baseline>,
     output: Option<OutputFile>,
     automatic: Option<(PathBuf, String)>,
+    lock_root: PathBuf,
+    ecosystem: Option<crate::lockfile::Ecosystem>,
+    ci: bool,
+    initial_lock: Option<crate::lockfile::Summary>,
 }
 
 impl Session {
@@ -344,7 +417,7 @@ impl Session {
         let state = cwd.join(".veil-tell");
         let key = command_key(command);
         let default = baseline_path(&state, &key);
-        let before = if let Some(input) = &options.input {
+        let mut before = if let Some(input) = &options.input {
             Some(baseline(input).map_err(|e| error(format!(
                 "cannot read baseline {}: {e}; check the path or create a new baseline with --baseline-out / 基準ファイルのパスを確認してください",
                 input.display()
@@ -364,6 +437,25 @@ impl Session {
                 "CI baseline is missing / CI の基準がありません。Run the same command locally with veil-tell and commit its baseline, or pass --baseline FILE",
             ));
         }
+        use crate::lockfile::{Ecosystem, Summary};
+        let executable = command
+            .first()
+            .and_then(|arg| Path::new(arg).file_name())
+            .and_then(|s| s.to_str());
+        let ecosystem = match executable {
+            Some("cargo") => Some(Ecosystem::Cargo),
+            Some("npm") => Some(Ecosystem::Npm),
+            _ if cwd.join("package-lock.json").exists() => Some(Ecosystem::Npm),
+            _ if cwd.join("Cargo.lock").exists() => Some(Ecosystem::Cargo),
+            _ => None,
+        };
+        let initial_lock = ecosystem.and_then(|kind| Summary::read(cwd, kind));
+        if options.ci
+            && let Some(root) = std::env::var_os("VEIL_TELL_PR_BASE_LOCK_DIR")
+            && let Some(before) = &mut before
+        {
+            before.lockfile = ecosystem.and_then(|kind| Summary::read(Path::new(&root), kind));
+        }
         let output = options
             .output
             .as_deref()
@@ -372,6 +464,10 @@ impl Session {
         Ok(Self {
             before,
             output,
+            lock_root: cwd.into(),
+            ecosystem,
+            ci: options.ci,
+            initial_lock,
             automatic: options.automatic.then_some((state, key)),
         })
     }
@@ -392,9 +488,18 @@ impl Session {
     }
 
     pub fn finish(self, backend: Backend, events: &[Destination]) -> Result<Comparison> {
-        let current = Baseline::capture(backend, events);
+        let mut current = Baseline::capture(backend, events);
+        current.lockfile = if self.ci || self.before.is_some() || self.initial_lock.is_some() {
+            self.initial_lock
+        } else {
+            self.ecosystem
+                .and_then(|kind| crate::lockfile::Summary::read(&self.lock_root, kind))
+        };
+        if serde_json::to_vec_pretty(&current)?.len() as u64 >= MAX_BYTES {
+            current.lockfile = None;
+        }
         if let Some(output) = self.output {
-            output.save(|file| write_json(file, &current))?;
+            output.save(|file| write_json(file, &current, MAX_BYTES))?;
             return Ok(Comparison::new("created"));
         }
         if let Some((state, key)) = self.automatic {
@@ -416,17 +521,19 @@ impl Session {
                             before,
                             after: current,
                         },
+                        MAX_PENDING_BYTES,
                     )?;
                 } else {
                     let pending = state.join("pending.json");
-                    match read::<Pending>(&pending) {
+                    match read::<Pending>(&pending, MAX_PENDING_BYTES) {
                         Ok(value) if value.key == key => fs::remove_file(pending)?,
                         _ => {}
                     }
                 }
                 return Ok(diff);
             }
-            OutputFile::prepare(&path, "baseline")?.save(|file| write_json(file, &current))?;
+            OutputFile::prepare(&path, "baseline")?
+                .save(|file| write_json(file, &current, MAX_BYTES))?;
             eprintln!("veil-tell: {}", path.display());
             return Ok(Comparison::new("created"));
         }
@@ -446,7 +553,7 @@ pub fn accept(cwd: &Path) -> Result<u8> {
     }
     let _lock = lock(&state)?;
     let path = state.join("pending.json");
-    let pending: Pending = read(&path).map_err(|e| {
+    let pending: Pending = read(&path, MAX_PENDING_BYTES).map_err(|e| {
         error(format!(
             "cannot read pending review: {e}; run the command again / コマンドを再実行してください"
         ))
@@ -462,7 +569,7 @@ pub fn accept(cwd: &Path) -> Result<u8> {
             "baseline changed since the pending review; run the command again before accepting",
         ));
     }
-    replace(&destination, &pending.after)?;
+    replace(&destination, &pending.after, MAX_BYTES)?;
     fs::remove_file(path)?;
     eprintln!(
         "veil-tell: Baseline updated / 基準を更新しました: {}",
@@ -502,7 +609,7 @@ mod tests {
         let path = dir.path().join("baseline.json");
         OutputFile::prepare(&path, "baseline")
             .unwrap()
-            .save(|file| write_json(file, &first))
+            .save(|file| write_json(file, &first, MAX_BYTES))
             .unwrap();
         assert_eq!(baseline(&path).unwrap(), second);
         assert_eq!(

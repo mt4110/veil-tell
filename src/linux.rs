@@ -18,6 +18,7 @@ pub async fn prepare(
     cwd: &Path,
     secret: &str,
     attribute_npm: bool,
+    attribute_cargo: bool,
 ) -> Result<Launch> {
     let bwrap = std::env::var_os("VEIL_TELL_BWRAP")
         .map(PathBuf::from)
@@ -92,6 +93,19 @@ pub async fn prepare(
             .arg(crate::attribution::LINUX_SHELL);
         launch.args(["--setenv", "VEIL_TELL_RELAY_NPM", "1"]);
     }
+    if attribute_cargo {
+        let wrapper = temporary.path().join("rustc-wrapper");
+        crate::attribution::create_wrapper(
+            &wrapper,
+            Path::new(RELAY_PROGRAM),
+            crate::cargo_attribution::RUSTC_MODE,
+        )?;
+        launch
+            .arg("--ro-bind")
+            .arg(wrapper)
+            .arg(crate::cargo_attribution::LINUX_WRAPPER);
+        launch.args(["--setenv", "VEIL_TELL_RELAY_CARGO", "1"]);
+    }
     launch
         .arg("--bind")
         .arg(cwd)
@@ -131,6 +145,13 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
         crate::attribution::configure(
             &mut command,
             Path::new(crate::attribution::LINUX_SHELL),
+            &std::env::current_dir()?,
+        );
+    }
+    if std::env::var_os("VEIL_TELL_RELAY_CARGO").is_some() {
+        crate::cargo_attribution::configure(
+            &mut command,
+            Path::new(crate::cargo_attribution::LINUX_WRAPPER),
             &std::env::current_dir()?,
         );
     }

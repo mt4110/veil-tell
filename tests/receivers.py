@@ -225,6 +225,8 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
 
         if node_root:
             npm_destination_diff(cli, project, evidence, Path(node_root).resolve())
+            lockfile_destination_diff(cli, project, evidence, Path(node_root).resolve())
+            cargo_destination_diff(cli, project, evidence)
 
 
 def npm_destination_diff(cli, project, evidence, runtime):
@@ -310,6 +312,96 @@ def npm_destination_diff(cli, project, evidence, runtime):
     ], spoof["comparison"]
     print(result.stderr, end="")
     print(f"fixture os={sys.platform} spoof=unknown veil_tell_exit=21")
+
+
+def lockfile_destination_diff(cli, project, evidence, runtime):
+    demo = project / "lockfile-diff"
+    shutil.copytree(SCRIPT.parent / "fixtures" / "destination-diff", demo)
+    if sys.platform == "linux":
+        shutil.copytree(runtime, demo / "runtime", symlinks=True)
+        runtime = demo / "runtime"
+    env = dict(os.environ, PATH=f"{runtime / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+    install = ["npm", "install", "--foreground-scripts", "--no-audit", "--no-fund",
+               "--no-update-notifier", "--cache=.npm-cache"]
+    main = demo / "package.json"
+    manifest = json.loads(main.read_text())
+    manifest["dependencies"] = {
+        "veil-tell-demo-postinstall": "file:./postinstall",
+        "veil-tell-demo-quiet": "file:./quiet",
+    }
+    main.write_text(json.dumps(manifest))
+    original = demo / "postinstall/package.json"
+    active = json.loads(original.read_text())
+    old = dict(active, version="0.9.0", scripts={})
+    original.write_text(json.dumps(old))
+
+    def invoke(args, code=0):
+        result = subprocess.run(args, cwd=demo, env=env, capture_output=True, text=True, timeout=35)
+        assert result.returncode == code, (result.stdout, result.stderr)
+        return result
+
+    def refresh_lock():
+        invoke([*install, "--package-lock-only", "--ignore-scripts"])
+
+    refresh_lock()
+    baseline = evidence / "locked-npm.json"
+    invoke([cli, "observe", "--backend", "isolated", "--baseline-out", baseline, "--", *install])
+    assert any(p["version"] == "0.9.0" for p in json.loads(baseline.read_text())["lockfile"]["packages"])
+    original.write_text(json.dumps(active))
+    refresh_lock()
+
+    def compare(base, name, status):
+        report = evidence / f"lock-{name}.json"
+        result = invoke([cli, "ci", "--baseline", base, "--report", report, "--", *install], 21)
+        data = json.loads(report.read_text())
+        assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
+        assert data["comparison"]["lockfile_evidence"][0]["status"] == status, data["comparison"]
+        print(next(line.strip() for line in result.stderr.splitlines() if "←" in line))
+
+    compare(baseline, "updated", "corroborated")
+    # Build a second baseline with the updated lock but no script invocation.
+    unchanged = evidence / "locked-npm-unchanged.json"
+    invoke([cli, "observe", "--backend", "isolated", "--baseline-out", unchanged, "--", *install, "--ignore-scripts"])
+    compare(unchanged, "unchanged", "unchanged")
+
+    manifest["dependencies"]["veil-tell-demo-spoof"] = "file:./spoof"
+    del manifest["dependencies"]["veil-tell-demo-postinstall"]
+    main.write_text(json.dumps(manifest))
+    refresh_lock()
+    compare(baseline, "spoof", "candidates")
+    print(f"fixture os={sys.platform} lockfile=corroborated,unchanged,candidates exit=21")
+
+
+def cargo_destination_diff(cli, project, evidence):
+    demo = project / "cargo-destination"
+    shutil.copytree(SCRIPT.parent / "fixtures" / "cargo-destination", demo)
+    baseline = evidence / "locked-cargo.json"
+    report = evidence / "cargo-diff.json"
+
+    def invoke(args, code=0):
+        result = subprocess.run(args, cwd=demo, capture_output=True, text=True, timeout=60)
+        assert result.returncode == code, (result.stdout, result.stderr)
+        return result
+
+    # First record the same build before the fixture activates its CONNECT.
+    script = demo / "build-probe/build.rs"
+    original = script.read_text()
+    script.write_text("fn main() {}\n")
+    invoke([cli, "observe", "--baseline-out", baseline, "--", "cargo", "build"])
+    assert json.loads(baseline.read_text())["lockfile"]["ecosystem"] == "cargo"
+    script.write_text(original)
+    result = invoke([cli, "observe", "--baseline", baseline, "--fail-on-new",
+                     "--report", report, "--", "cargo", "build"], 21)
+    data = json.loads(report.read_text())
+    assert data["comparison"]["added"][0]["attribution"][0]["package"] == {
+        "name": "veil-build-probe", "version": "1.2.3", "script": "build.rs", "path": "build-probe",
+    }, data
+    assert data["comparison"]["lockfile_evidence"][0]["status"] == "unchanged"
+    print(next(line.strip() for line in result.stderr.splitlines() if "←" in line))
+    warm = evidence / "cargo-warm.json"
+    invoke([cli, "observe", "--baseline", baseline, "--report", warm, "--", "cargo", "build"])
+    assert json.loads(warm.read_text())["destinations"] == []
+    print(f"fixture os={sys.platform} cargo=build.rs exit=21 cached_connects=0")
 
 
 def run(cli, fixture, node_root=None):
