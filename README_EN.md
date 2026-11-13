@@ -14,6 +14,8 @@ In an npm project, run `veil-tell npm install` twice. The first successful run s
 
 For CI, run `veil-tell npm ci` locally, commit the baseline, and run `veil-tell ci -- npm ci`. CI enables isolation, blocks new CONNECT destinations before dialing them, and exits with code `21`. Capture covers HTTP CONNECT requests that reach the local proxy. Direct connection destinations and TLS contents are outside that scope. [Dependency update PR example and reproducible demo](docs/destination-diff.md)
 
+For new destinations in npm runs, veil-tell can show the package, version, lifecycle script, and relative path as `inferred`. It reports `unknown` when the context is unavailable. Scripts can alter environment variables or proxy credentials to erase or forge attribution. Destination checks and CI blocking for valid CONNECT requests that reach the proxy are independent of those labels. [Measured behavior and spoofing limits](docs/destination-diff.md)
+
 ## Can I block this destination?
 
 On macOS, we ran Prompt Recipe from the same source and lockfile, changing only the rule for `registry.npmjs.org:443`.

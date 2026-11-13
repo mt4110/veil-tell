@@ -290,3 +290,21 @@ CONNECT で判別できる単位は正規化したホスト名と443番ポート
 | Anthropic Sandbox Runtime | OS 隔離とネットワーク許可リストが重なる。veil-tell では任意コマンドの実測を Git でレビューできる基準にし、次回の差分を出す。[公式実装](https://github.com/anthropics/sandbox-runtime) |
 | Socket.dev | 依存更新で追加されるインストールスクリプトやネットワーク利用を PR に報告する点が近い。Socket の依存分析に対して、veil-tell は実行時に観測した CONNECT を比較する。[Socket for GitHub](https://docs.socket.dev/docs/socket-for-github) |
 | StepSecurity Harden-Runner | CI の外向き通信を観測し、履歴ベースの異常検知と許可リストによる制限を提供するため、目的が最も近い。veil-tell の対象は個々のコマンドで、基準は利用者がローカルで生成・レビューする。[StepSecurity Baseline](https://docs.stepsecurity.io/gitlab/harden-runner/baseline) · [Harden-Runner](https://github.com/step-security/harden-runner) |
+
+### npm ライフサイクルの帰属
+
+| 候補 | 実現できる範囲と判断 |
+| --- | --- |
+| A. npm の `script-shell` と CONNECT の付加情報 | npm はスクリプトをパッケージの作業ディレクトリで起動し、マニフェストのパスとライフサイクル情報を渡す。起動時に `package.json` の名前・バージョン・スクリプト本文を環境と照合できる。Linux と macOS で同じ意味の推定を出せるので採用する。[npm scripts](https://docs.npmjs.com/cli/using-npm/scripts) · [npm の起動処理](https://github.com/npm/run-script/blob/main/lib/make-spawn-args.js) |
+| B. ソケットとプロセスの照合 | Linux の `SO_PEERCRED` は Unix ソケットの相手を示す。ホスト側の相手は隔離内の中継で、実際の子は中継の手前で TCP 接続する。隔離内でソケット inode と `/proc/<pid>/fd` を照合できる場合も、FD の共有や PID の終了、cwd の変更により推定にとどまる。macOS には `libproc` のプロセス・FD 情報があるが、取得権限や競合があり、TCP の相手から npm ライフサイクルまでは分からない。[Linux unix(7)](https://man7.org/linux/man-pages/man7/unix.7.html) · [Apple の proc_info.h](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/proc_info.h) |
+| C. npm ログやカーネルトレース | npm のログだけでは、並行するライフサイクルと個々の CONNECT を結びつけられない。カーネルトレースを前提にすると、両 OS での非特権運用と互換性の条件が増える。 |
+
+短縮形や差分モードで直接起動する `npm` には、自動で起動ラッパーを指定する。シェルなどを介す場合は `--attribute-npm` を付ける。ラッパーは既存のローカルプロキシ認証に帰属の付加情報を添え、同じシェル引数を `/bin/sh` に渡す。帰属が有効な場合は npm の `script-shell` 設定にラッパーを指定し、既定の POSIX シェルで実行する。別の `script-shell` を明示してラッパーを迂回すると、帰属は得られない。Linux ではラッパーを読み取り専用でマウントし、macOS では隔離から書き換えを禁止する。
+
+`inferred` は起動時の npm 情報とマニフェストが一致したという推定。確定できた実行主体として扱わない。情報が欠けている、照合に失敗した、付加情報が壊れている場合は `unknown`。パッケージがスクリプト起動後に環境や資格情報を変更し、付加情報を削除・再利用・作成することは可能で、もっともらしい別の推定が出る場合もある。子孫への環境継承もあるため、表示はスクリプト実行の文脈を表す。npm 由来の識別情報はローカルプロキシで消費し、宛先には転送しない。
+
+宛先の正規化、基準との照合、拒否と終了コードは帰属情報を参照しない。帰属を有効にした実行では、構文が有効な CONNECT の宛先は認証情報が欠落・不正でも記録し、トンネルは開かない。CI ではその宛先も新規判定の対象になる。プロキシを経由しない通信の観測範囲は従来どおり。
+
+実行レポートとベースラインは `schema_version: 1` のまま、各宛先に任意の `attribution` 配列を追加する。既存の v1 基準はそのまま読み込める。古いバイナリに基準を渡す場合は `attribution` を削除して使う。帰属は差分のキーに含めない。帰属情報が多い宛先では最大4件の推定と `unknown` を保持し、帰属だけを増やしても宛先の記録枠は消費しない。
+
+Harden-Runner も外向き通信をプロセスやコマンドに関連付ける。veil-tell がここで提供するのは、コマンドごとの差分に npm のパッケージ・バージョン・ライフサイクル・相対パスを付けて、JSON とジョブ要約に表示する機能。[Harden-Runner](https://github.com/step-security/harden-runner)

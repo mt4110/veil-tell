@@ -18,16 +18,20 @@ fi
 python3 -B tests/receivers.py target/debug/veil-tell target/debug/examples/receiver_cli "$NODE_ROOT"
 ```
 
-試験は一時プロジェクトに [fixture](../tests/fixtures/destination-diff/) をコピーします。初回の `npm install` で基準を作成し、次に `file:./postinstall` の依存を1件追加します。追加したパッケージの `postinstall` は `postinstall.local:443` へ CONNECT を1回送ります。子プロセスはプロキシの `403` を受けて成功終了し、比較側は新規宛先を記録して `21` を返します。この名前は観測モードでも固定のローカル名制約で拒否され、外部の受信口を使いません。同じ fixture を `ci` でも実行し、基準にない宛先の拒否と終了コード `21` を確認します。別の受信側試験では、ローカル受信口で観測実行のペイロード1件と CI の拒否時0件を照合します。
+試験は一時プロジェクトに [fixture](../tests/fixtures/destination-diff/) をコピーします。初回の `npm install` で基準を作成し、次に通信する `file:./postinstall` と通信しない `file:./quiet` の依存を追加します。追加したパッケージの `postinstall` は `postinstall.local:443` へ CONNECT を1回送ります。子プロセスはプロキシの `403` を受けて成功終了し、比較側は新規宛先を記録して `21` を返します。この名前は観測モードでも固定のローカル名制約で拒否され、外部の受信口を使いません。同じ fixture を `ci` でも実行し、基準にない宛先の拒否と終了コード `21` を確認します。別の受信側試験では、ローカル受信口で観測実行のペイロード1件と CI の拒否時0件を照合します。
 
-macOS と Ubuntu で得た出力の抜粋です。
+macOS と Ubuntu で得た出力の抜粋です。通常 fixture では2つのパッケージの `postinstall` が動き、接続した一方だけが帰属に出ます。偽装 fixture は別パッケージ名を環境に設定して帰属用の付加情報を壊します。元のセッション資格情報は保持するため、CONNECT は記録され、帰属は `unknown` になります。
 
 ```text
-receiver case=destination-diff observe_payload=1 ci_payload=0 exit=21
+postinstall.local:443 ← veil-tell-demo-postinstall@1.0.0 postinstall (postinstall) [inferred / 推定]
 fixture os=darwin npm_exit=0 veil_tell_exit=21
 fixture os=linux npm_exit=0 veil_tell_exit=21
-fixture comparison {"added": [{"attempts": 1, "host": "postinstall.local", "port": 443}], "backend_changed": false, "count_changes": [], "removed": [], "status": "compared"}
+spoof.local:443 ← unknown / 特定できません
+fixture os=darwin spoof=unknown veil_tell_exit=21
+fixture os=linux spoof=unknown veil_tell_exit=21
 ```
+
+**記事用の一行**　テスト用の依存を追加したら、新規 CONNECT で CI が終了コード `21` を返し、`veil-tell-demo-postinstall@1.0.0` の `postinstall` が発信元の候補に出た。
 
 ## 依存更新 PR で使う
 
@@ -65,4 +69,4 @@ jobs:
           path: ${{ steps.veil.outputs.report }}
 ```
 
-Action は PR のベースコミットから基準を読みます。通常の PR に含まれる基準の変更は、同じ PR の判定に使われません。必須チェックにする場合は、ワークフロー自体をベース側で管理してください。比較結果は v1 レポートの `comparison` に入り、`run_status` の `new_destination` と終了コード `21` で CI の失敗理由を確認できます。接続先の消失と大きな回数変化は表示されます。 [形式・判定条件](design.md#v030-宛先の差分チェック)
+Action は PR のベースコミットから基準を読み、新規宛先と推定した npm の発信元をジョブ要約の表に表示します。通常の PR に含まれる基準の変更は、同じ PR の判定に使われません。必須チェックにする場合は、ワークフロー自体をベース側で管理してください。比較結果は v1 レポートの `comparison` に入り、`run_status` の `new_destination` と終了コード `21` で CI の失敗理由を確認できます。接続先の消失と大きな回数変化は表示されます。 [形式・判定条件](design.md#v030-宛先の差分チェック)
