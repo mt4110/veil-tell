@@ -556,3 +556,37 @@ jq '{
 ```
 
 送信量超過の `observed.sent_bytes` と `limits.max_connection_bytes` はどちらも `131072` です。両 OS の `receiver.log` で `received=131072` と一致することを確認できます。
+
+## 9. image-drop-input の依存更新 PR で変更前の基準を確認する
+
+検証用のドラフト PR #75 で `marked` を `18.1.3` から `18.2.0` に更新し、Ubuntu 26.04 の GitHub Actions で公開版 v0.4.0 の `uses: mt4110/veil-tell@v0` を実行しました。両ケースとも PR 側のロックファイルで隔離した `npm ci` を実行しました。 [PR #75](https://github.com/mt4110/image-drop-input/pull/75) · [実行結果](https://github.com/mt4110/image-drop-input/actions/runs/43460620667)
+
+変更前のベースコミット `e39050e` の `.veil-tell/npm.json` には `registry.npmjs.org:443` だけが登録されています。PR 側のコミット `0fe60f4` の基準には対照用の `veil-tell-pr-control.test:443` も登録しました。それでも対照の CONNECT が拒否されたことを、Action が変更前の基準を使った証拠として確認しました。
+
+### ジョブ要約と JSON を照合する
+
+実行ページの **Summary** で両ケースの要約を確認できます。成果物には要約を保存した `normal-summary.md` と `control-summary.md`、各 JSON、ベース側の `base.json`、PR 側の `head.json`、両コミットの SHA を記録した `refs.txt` が入っています。 [検証成果物](https://github.com/mt4110/image-drop-input/actions/runs/43460620667/artifacts/14055089450)
+
+```bash
+gh run download 43460620667 --repo mt4110/image-drop-input \
+  --name veil-tell-pr-evidence --dir pr75-evidence
+
+cat pr75-evidence/refs.txt
+jq '[.destinations[] | {host, port}]' pr75-evidence/{base,head}.json
+jq '{
+  child_exit: .child_status.exit_code,
+  run_status,
+  added: [.comparison.added[] | {host, port, attribution}],
+  blocked: [.destinations[] | select(.result == "blocked") |
+    {host, port, reason, result, sent_bytes}],
+  lockfile_updates: [.comparison.lockfile_changes.updated[] |
+    {name: .before.name, from: .before.version, to: .after.version}]
+}' pr75-evidence/{normal,control}.json
+```
+
+| ケース | Action の終了コード | ジョブ要約と JSON |
+| --- | --- | --- |
+| 通常の `npm ci` | `0` | 新しい送り先・試み・送信量の異常なし。`normal.json` は `run_status.reason: completed`、`comparison.added` は空。 |
+| `npm ci` 後に未登録 CONNECT | `21` | 要約の `CONNECT` 行に対照用の宛先が出る。実行ログは HTTP `403`、`control.json` は `run_status.reason: new_destination`、`destinations[].result: blocked`、`sent_bytes: 0`。 |
+
+`child_status.exit_code` は両ケースで `0` です。検証ジョブは対照ステップの `21` を捕捉し、期待どおりの拒否を確認して成果物をアップロードしました。両 JSON の `comparison.lockfile_changes.updated` には `marked` の更新が記録されています。対照の要約に出る `marked@18.2.0` はロックファイル差分から挙げた変更候補です。CONNECT の帰属は `unknown` で、試行は検証用スクリプトが生成しました。
