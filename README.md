@@ -20,6 +20,8 @@ macOS で Prompt Recipe の同じソースとロックファイルを使い、`r
 
 Ubuntu 26.04.1 LTS（`hp-ubuntu`）でも、公開版 `v0.2.0` を sudo なしで実行し、ビルドとテスト216件が許可・拒否の両方で通りました。単独の `npm audit` は拒否時だけ失敗しました。 [Ubuntu の隔離内で Node.js・npm を使う準備](docs/runbook.md#ubuntu-の隔離内で-nodejs-と-npm-を使う)
 
+image-drop-input の GitHub Actions でも、依存キャッシュを使ったビルドとテスト216件がレジストリの許可・拒否の両方で通りました。単独の `npm audit` は拒否時だけ失敗し、ジョブが終了コード `1` で失敗した後も `workflow.json` と `audit.json` を回収できました。 [実行結果](https://github.com/mt4110/image-drop-input/actions/runs/43370286803) · [手動実行と JSON の見方](docs/runbook.md#7-image-drop-input-の-github-actions-で-verify-を実行する)
+
 ## ビルドと実行
 
 リポジトリで `cargo install --locked --path .` を実行します。以下は、公開 npm レジストリだけを許可して `is-number@7.0.0` を取得する例です。

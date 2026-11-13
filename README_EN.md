@@ -20,6 +20,8 @@ On **image-drop-input**, we used the published `v0.2.0` binary on macOS with the
 
 On Ubuntu 26.04.1 LTS (`hp-ubuntu`), we ran the published `v0.2.0` binary without sudo. The build and all 216 tests passed with the registry both allowed and blocked. The standalone `npm audit` failed only when the registry was blocked. [Set up Node.js and npm inside Ubuntu isolation (Japanese)](docs/runbook.md#ubuntu-の隔離内で-nodejs-と-npm-を使う)
 
+On GitHub Actions, the cached image-drop-input build and all 216 tests passed with the registry both allowed and blocked. The standalone `npm audit` failed only with the registry blocked. The job failed with exit code `1`, and both `workflow.json` and `audit.json` were available to download. [Workflow run](https://github.com/mt4110/image-drop-input/actions/runs/43370286803) · [Run manually and read the JSON (Japanese)](docs/runbook.md#7-image-drop-input-の-github-actions-で-verify-を実行する)
+
 ## Build and run
 
 Run `cargo install --locked --path .` from the repository. The example below allows only the public npm registry to install `is-number@7.0.0`.
