@@ -356,7 +356,7 @@ jq '{
 
 ## 6. image-drop-input で verify を再現する
 
-公開版 veil-tell `v0.2.0` の macOS arm64 バイナリを SHA-256 で照合し、macOS 27.2 arm64 で sudo なしで実行しました。image-drop-input はコミット `1cc4f42b59992bf63cc646ac88bcb0834b6215cc`、Node.js は 26.13.0、npm は 12.2.2 です。 [veil-tell v0.2.0 の配布ページ](https://github.com/mt4110/veil-tell/releases/tag/v0.2.0)
+macOS 27.2 arm64 と Ubuntu 26.04.1 LTS x86_64（`hp-ubuntu`）で、公開版 veil-tell `v0.2.0` の各アーカイブを SHA-256 で照合し、sudo なしで実行しました。両環境で image-drop-input のコミット `1cc4f42b59992bf63cc646ac88bcb0834b6215cc`、Node.js 26.13.0、npm 12.2.2 を使いました。依存キャッシュは OS ごとに準備し、同じ OS の許可・拒否・再許可で同じ初期キャッシュを使いました。 [veil-tell v0.2.0 の配布ページ](https://github.com/mt4110/veil-tell/releases/tag/v0.2.0)
 
 ### 比較条件と実行コマンド
 
@@ -406,6 +406,40 @@ exit "$status"
 SH
 ```
 
+### Ubuntu の隔離内で Node.js と npm を使う
+
+第1節の Ubuntu の手順で `/usr/bin/bwrap` を確認します。Ubuntu x86_64 の配布アーカイブは `veil-tell-0.2.0-linux-x86_64-gnu.tar.gz` です。`SHA256SUMS` と照合して展開し、`veil` に実行ファイルの絶対パスを設定します。
+
+Linux の隔離では、ホームディレクトリの作業ツリーの外に展開した Node.js や npm は見えません。試験用の `cold` に入れておくと、準備用の `prime` と `verify` の各試行に同じツールがコピーされます。次のコマンドは `cold` を作成してから `prime` と `warm` にコピーする前に実行します。
+
+```bash
+(
+  set -euo pipefail
+  cd "$demo"
+  curl -fsSLO https://nodejs.org/dist/v26.13.0/node-v26.13.0-linux-x64.tar.xz
+  printf '%s\n' 'd28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997  node-v26.13.0-linux-x64.tar.xz' |
+    sha256sum -c
+  tar -xf node-v26.13.0-linux-x64.tar.xz
+  curl -fsSLO https://registry.npmjs.org/npm/-/npm-12.2.2.tgz
+  test "$(openssl dgst -sha512 -binary npm-12.2.2.tgz | openssl base64 -A)" = \
+    'KglgbZyacf7jH+FHuNRqVuCzQi8VhI2a7J87Ix43FsPTuZoGWmIXXGdZtBUOA79vwL+IJREqURVzupA7PsQTcA=='
+  mkdir -p cold/.trial-toolchain/bin cold/.trial-toolchain/npm
+  cp node-v26.13.0-linux-x64/bin/node cold/.trial-toolchain/bin/
+  tar -xzf npm-12.2.2.tgz --strip-components=1 -C cold/.trial-toolchain/npm
+  ln -s ../npm/bin/npm-cli.js cold/.trial-toolchain/bin/npm
+)
+```
+
+`$demo/cold/check.sh` の `set -eu` の直後に以下を入れます。`$PWD` は隔離内の各作業コピーを指し、ログの先頭でバージョンを確認できます。
+
+```bash
+export PATH="$PWD/.trial-toolchain/bin:/usr/bin:/bin"
+node --version
+npm --version
+```
+
+### キャッシュを用意して比較する
+
 第5節の手順どおり、`registry.npmjs.org:443` だけを許可し、準備用の `npm ci` で得た `_cacache` だけを `warm` に移します。同じ `trial` 関数を定義し、その末尾にある Prompt Recipe 用の呼び出しを次の2行に差し替えます。
 
 ```bash
@@ -414,6 +448,8 @@ trial audit warm 120 audit
 ```
 
 ### 終了コードと JSON の見方
+
+以下は macOS と Ubuntu の両方で、ログ・終了コード・JSON が一致した結果です。
 
 | 工程 | トップレベルの判定と終了コード | 各試行で確認したこと |
 | --- | --- | --- |
