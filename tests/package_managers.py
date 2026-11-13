@@ -20,11 +20,13 @@ def test_manager(cli, tool, manager):
         project = root / "project"
         project.mkdir()
         env = dict(os.environ, PATH=f"{tool.parent}:{os.environ['PATH']}")
+        runtime_tool = tool
         if sys.platform == "linux":
             # Bubblewrap exposes the workspace, /usr and /nix/store.
             runtime = project / "runtime"
             shutil.copytree(tool.parent.parent, runtime, symlinks=True)
-            env["PATH"] = f"{runtime / tool.parent.name}:{os.environ['PATH']}"
+            runtime_tool = runtime / tool.parent.name / tool.name
+            env["PATH"] = f"{runtime_tool.parent}:{os.environ['PATH']}"
         package = {"name": "fixture", "private": True, "version": "1.0.0"}
         if manager == "bun":
             package["trustedDependencies"] = ["probe"]
@@ -36,7 +38,7 @@ def test_manager(cli, tool, manager):
             "scripts": {"postinstall": "node -e 'process.exit(0)'"},
         })
         write_json(project / "package.json", package)
-        command = [manager, "install"]
+        command = [runtime_tool, "install"]
         if manager == "pnpm":
             (project / "pnpm-workspace.yaml").write_text(
                 "onlyBuiltDependencies:\n  - probe\nupdateNotifier: false\n"
