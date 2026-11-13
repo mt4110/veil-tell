@@ -291,7 +291,7 @@ def volume_test(fixture, project, evidence, node_root):
                 thread.join()
             assert child.returncode == code and received == [expected], (child.stderr, received)
             result = json.loads(report.read_text())
-            assert result["child_status"]["exit_code"] == 0
+            assert result["child_status"]["exit_code"] == 0, (child.stdout, child.stderr, result)
             assert result["destinations"][0]["sent_bytes"] == expected
             if name != "train":
                 anomaly, = result["volume_anomalies"]
@@ -799,8 +799,10 @@ if __name__ == "__main__":
                     conn.sendall(b"X" * int(sys.argv[2]))
                     conn.shutdown(socket.SHUT_WR)
                     stream.read()
-                except (ConnectionResetError, BrokenPipeError):
-                    pass
+                except OSError as error:
+                    # The proxy may close before this process calls shutdown.
+                    if error.errno not in (errno.ECONNRESET, errno.EPIPE, errno.ENOTCONN):
+                        raise
     elif sys.argv[1] == "fd":
         try:
             os.write(int(sys.argv[2]), b"inherited-fd")
