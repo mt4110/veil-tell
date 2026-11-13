@@ -342,3 +342,17 @@ Node.js で観測する範囲、帰属の限界、Linux と macOS の DNS 受付
 ### 許可済みトンネルの送信量
 
 [トンネルの送信量](volume-limits.md) に基準・制限方式・観測範囲を記載。
+
+### v0.4.0 の選択と先行例
+
+- **StepSecurity Harden-Runner** はランナーで宛先の基準化と異常検知を行う。この用途は重なる。veil-tell は開発者のローカルと CI で同じコマンドを比較し、Git に置く基準とロックファイル差分を PR レビューに使う。[Harden-Runner](https://github.com/step-security/harden-runner)
+- **Anthropic Sandbox Runtime** と OS 隔離＋プロキシの構成が重なる。veil-tell は依存更新の前後の差分、推定帰属、送信量をレビューに使う。[Sandbox Runtime](https://github.com/anthropics/sandbox-runtime)
+- **Socket** は依存パッケージのリスク分析を提供する。veil-tell の記録は、利用者が実行したコマンドがその条件下で示した通信に限る。[Socket](https://socket.dev/features)
+- **OpenSnitch・LuLu・Little Snitch** はホスト上でプロセスの通信を監視・制御する。veil-tell は指定コマンドの一回の実行を単位にする。[OpenSnitch](https://github.com/evilsocket/opensnitch) · [LuLu](https://objective-see.org/products/lulu.html) · [Little Snitch](https://www.obdev.at/products/littlesnitch/index.html)
+- **Zeek** の `conn.log` は方向別のバイト数を記録し、`dns.log` は DNS を記録する。veil-tell の量は CONNECT トンネル内の計測で、名前解決の試みは Node.js のフックを通ったものに限る。[Zeek conn.log](https://docs.zeek.org/en/current/reference/logs/conn.html) · [Zeek dns.log](https://docs.zeek.org/en/current/reference/logs/dns.html)
+
+採用したのは、既存の隔離境界の内側で Node.js の名前解決の試みを拾う方式と、ホスト側プロキシで TLS トンネルの送信予算を共有する方式。UDP 53 の固定受付は Ubuntu の既存 AppArmor 設定では動かなかった。macOS のホスト DNS を許可する案は隔離範囲を変えるため見送った。初期しきい値は単一のレビュー済み実行と余裕倍率を使う。分位点の採用には、同じ条件での複数回の測定とレビュー可能な採取手順が必要になる。
+
+pnpm と Yarn の Node.js スクリプトは、起動時のライフサイクル環境を作業ディレクトリのマニフェストに照合する。Yarn Berry の組み込みシェルや pnpm の設定を置換しない。Bun が Node.js のプロセスとして起動したスクリプトでは、対応する名前解決の試みは記録でき、帰属は unknown。グローバルストアのホストマウントは行わない。再現にはプロジェクト内の pnpm ストアや Yarn キャッシュを使う。名前・バージョン・integrity または checksum が一致しても、実際に走ったコードの一致や通信の動機は証明できない。同じバージョンのままコードが差し替わる場合や、特定の実行条件だけで通信する場合がある。[pnpm settings](https://pnpm.io/settings) · [Yarn scripting](https://yarnpkg.com/features/scripting) · [Bun install](https://bun.com/docs/pm/cli/install)
+
+pip を対象にするなら、PEP 517 のビルドバックエンド用プロセスの起動点と、そのビルド環境に入った配布名・バージョンの対応を取る必要がある。通常のインストールとソース配布物からのビルドを分けて試験する。今回の実装範囲は Cargo の既存 `build.rs` までで、proc-macro と pip の帰属は範囲外。

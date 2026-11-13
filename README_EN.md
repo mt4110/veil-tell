@@ -92,7 +92,7 @@ Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. 
 - **Capture includes HTTP CONNECT requests that reach the local proxy.** The proxy backend permits direct connections, which are outside its capture scope.
 - **Isolation also records supported Node.js lookup attempts.** The report identifies this as `coverage.dns_attempts: node_dns_lookup_hook`. Native system resolvers and direct IP attempts are outside this coverage. [Details](docs/dns-attempts.md)
 - **The isolated backend restricts direct connections at the OS level.** Both modes report `coverage.proxy = "http_connect_requests"` and `coverage.direct_attempt_destinations = "not_observed"` in JSON v1. The report omits details of OS-denied direct connections and IPC.
-- **Data can still leave through an allowed host.** For example, a child process may be able to send secrets to an allowed GitHub host or npm registry using credentials it can access or public upload features. The proxy tunnels TLS. HTTP methods, URL paths, and request bodies are outside its capture and control scope. An allow rule permits a tunnel to the host.
+- **Data can still leave through an allowed host.** CI and explicitly configured limits can close a tunnel when outbound volume exceeds its budget. Bytes within the limit can still reach the receiver. [Volume limits and scope](docs/volume-limits.md) For example, a child process may be able to send secrets to an allowed GitHub host or npm registry using credentials it can access or public upload features. The proxy tunnels TLS. HTTP methods, URL paths, and request bodies are outside its capture and control scope. An allow rule permits a tunnel to the host.
 
 veil-tell overlaps with host-level controls in LuLu, Little Snitch, and OpenSnitch, process isolation in Firejail, and traffic inspection in mitmproxy. Its unit of observation is the command it launches, and a reviewed policy can be used locally and in CI. [Comparison with related tools](docs/design.md#8-先行例との関係)
 
@@ -161,3 +161,23 @@ On macOS, install the Xcode command-line tools and run `python3 -B tests/macos-i
 [MIT license](LICENSE) · [Report a vulnerability](SECURITY.md#security-policy) · [macOS and Ubuntu runbook (Japanese)](docs/runbook.md)
 
 [Design](docs/design.md) · [Linux experiments](experiments/linux-egress/README.md) · [macOS experiments](experiments/macos-egress/README.md)
+
+## Other CI systems and local hooks
+
+Review and commit `.veil-tell/npm.json` and make veil-tell, Node.js and bubblewrap available on the runner.
+
+```yaml
+# .gitlab-ci.yml
+outbound:
+  script:
+    - veil-tell ci -- npm ci
+```
+
+To run the same check before a local push, save the following as `.git/hooks/pre-push` and run `chmod +x .git/hooks/pre-push`. The command reinstalls dependencies in the working tree.
+
+```sh
+#!/bin/sh
+exec veil-tell ci -- npm ci
+```
+
+Dependency commands create baselines automatically. To save one for another command, use `veil-tell --save-baseline COMMAND`. Run `veil-tell clean` to preview legacy hash-named baselines and `veil-tell clean --apply` to remove them. `--json` writes the report to stdout and sends child output and guidance to stderr.

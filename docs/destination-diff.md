@@ -117,4 +117,32 @@ veil-tell: attempted (blocked) / 名前解決を拒否: postinstall.invalid ← 
 
 ### 許可済みトンネルの送信上限
 
-受信側試験では、同じローカル宛先に 524,288 バイトを送信した。`observe` では受信側に全量が届き、終了コード 0 と送信量の異常が記録された。`restrict` の明示上限では 8,192 バイト、基準を使う `ci` では1接続の下限にあたる 131,072 バイトで転送が止まり、子は 0、veil-tell は 22 になった。JSON の `volume_anomalies` では `blocked` と計測値・上限を確認できる。[しきい値と範囲](volume-limits.md)
+```text
+veil-tell: volume anomaly / 送信量の異常: allowed.test:443 sent 131072/262144 bytes, connections 1/64, max connection 131072/131072 bytes ← veil-volume-fixture@1.2.3 postinstall (.), inferred / 推定
+```
+
+受信側試験では、同じローカル宛先に 524,288 バイトを送信した。`observe` では受信側に全量が届き、終了コード 0 と送信量の異常が記録された。`restrict` の明示上限では 8,192 バイト、基準を使う `ci` では1接続の下限にあたる 131,072 バイトで転送が止まり、子は 0、veil-tell は 22 になった。通常の npm install / ci を同じローカルレジストリで5回繰り返した試験では異常0件。npm の `postinstall` を送信元にした試験でも両OSで 131,072 バイトで止まり、推定帰属が出た。JSON の `volume_anomalies` では `blocked` と計測値・上限を確認できる。[しきい値と範囲](volume-limits.md)
+
+### pnpm・Yarn・Bun の実測
+
+pnpm 10.30.3、Yarn Berry 4.9.4、Yarn Classic 1.22.22、Bun 1.4.4 を使った。外部レジストリの代わりにローカル依存を追加する試験で、同じ構成の5回の実行に承認待ちはなく、CI は 0。更新側の Node.js `postinstall` では 21。pnpm と両 Yarn は推定帰属、Bun は unknown。
+
+```text
+veil-tell: attempted (blocked) / 名前解決を拒否: new-package.invalid ← probe@1.2.3 postinstall (node_modules/.pnpm/probe@file+dep/node_modules/probe) [inferred / 推定]
+```
+
+手元の再現には `tests/package_managers.py` に試す実行ファイルを渡す。Linux では Node.js と対象ツールの実行ファイルを同じランタイムディレクトリの `bin/` に用意する。試験がそのディレクトリをプロジェクトにコピーする。
+
+```sh
+cargo build --locked --bins --examples
+python3 -B tests/package_managers.py target/debug/veil-tell "pnpm=$(command -v pnpm)" "yarn=$(command -v yarn)"
+```
+
+pnpm の同一ホストでの単発比較は、Ubuntu が対照 0.422 秒、隔離 0.450 秒（1.07 倍）、macOS が対照 0.320 秒、隔離 0.361 秒（1.13 倍）。同じローカル依存と空のプロジェクトキャッシュでの単発測定。レジストリを使う大規模プロジェクトの性能はこの値から判断できない。以前報告された70秒の失敗は元のプロジェクトと設定がなく、原因は特定できていない。
+
+`pnpm install` が隔離内で失敗する場合は、pnpm・Node.js の実行ファイルが隔離内で見えること、ストアがプロジェクト内にあり再利用可能であること、プロジェクトの pnpm バージョン指定が事前に用意した実行ファイルと一致することを確認する。オフラインで未取得の依存がある場合は、明示的に使うレジストリとキャッシュ条件をそろえてから基準を作る。
+
+
+### GitHub Action の公開後の検証
+
+署名付き `v0.4.0` のタグで配布ワークフローを実行し、2つのアーカイブと `SHA256SUMS` を検証する。Release 公開後に `v0` の参照で README の例を起動する。配布バイナリの取得・来歴検証、PR ベース側からの基準読み込み、終了コード、要約と JSON を照合する。ローカルでは fixture を両OSで実行済み。GitHub 上の `@v0` と公開済みアーカイブを使う経路は未検証。

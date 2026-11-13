@@ -92,7 +92,7 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 - **ローカルプロキシに届いた HTTP CONNECT を記録します。** プロキシ方式では直接通信も可能で、その試行先は観測範囲外です。
 - **隔離モードでは Node.js の名前解決の試みも記録します。** `coverage.dns_attempts` が `node_dns_lookup_hook` の場合に限ります。システムリゾルバや IP 直打ちの試みは範囲外です。[詳細](docs/dns-attempts.md)
 - **隔離モードは OS 側で直接通信を制限します。** JSON v1 の `coverage.proxy = "http_connect_requests"` と `coverage.direct_attempt_destinations = "not_observed"` は両モードに共通です。OS が拒否した直接通信や IPC の詳細は JSON に記録されません。
-- **許可したホスト経由の持ち出しは残ります。** たとえば、子プロセスが使える認証情報や公開アップロード機能を通じて、許可済みの GitHub や npm レジストリへ秘密情報を送れる場合があります。プロキシは TLS を終端せず、HTTP メソッド、URL パス、本文は観測・制御の範囲外です。ホストの許可は、そのホストへのトンネルを許可します。
+- **許可したホスト経由の持ち出しは残ります。** 送信量を比較でき、CI または明示的な制限では上限超過でトンネルを閉じます。上限までのデータは届き得ます。 [送信量のしきい値と範囲](docs/volume-limits.md) たとえば、子プロセスが使える認証情報や公開アップロード機能を通じて、許可済みの GitHub や npm レジストリへ秘密情報を送れる場合があります。プロキシは TLS を終端せず、HTTP メソッド、URL パス、本文は観測・制御の範囲外です。ホストの許可は、そのホストへのトンネルを許可します。
 
 LuLu・Little Snitch・OpenSnitch のホスト側制御、Firejail のプロセス隔離、mitmproxy の通信調査と用途が重なります。veil-tell では、起動したコマンドを単位として観測し、レビューしたポリシーをローカルと CI で使えます。 [先行例との比較](docs/design.md#8-先行例との関係)
 
@@ -161,3 +161,23 @@ macOS の Mach/XPC 試験は、Xcode コマンドラインツールを用意し�
 [MIT ライセンス](LICENSE) · [脆弱性の報告](SECURITY.md) · [macOS・Ubuntu の再現手順](docs/runbook.md)
 
 [設計書](docs/design.md) · [Linux の実験](experiments/linux-egress/README.md) · [macOS の実験](experiments/macos-egress/README.md)
+
+## その他の CI とローカルフック
+
+先に `.veil-tell/npm.json` をレビューしてコミットし、ランナーに veil-tell、Node.js と bubblewrap を用意します。
+
+```yaml
+# .gitlab-ci.yml
+outbound:
+  script:
+    - veil-tell ci -- npm ci
+```
+
+`.git/hooks/pre-push` に次の内容を書き、`chmod +x .git/hooks/pre-push` で有効にします。`npm ci` は作業ツリーの依存を入れ直します。
+
+```sh
+#!/bin/sh
+exec veil-tell ci -- npm ci
+```
+
+基準は通常の依存コマンドだけで自動作成します。ほかのコマンドで必要なときは `veil-tell --save-baseline COMMAND`。古いハッシュ名の候補は `veil-tell clean` で確認し、削除する場合は `veil-tell clean --apply` を使います。`--json` はレポートを標準出力、子の出力と案内を標準エラー出力に送ります。
