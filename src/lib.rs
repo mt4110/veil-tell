@@ -8,6 +8,7 @@ mod policy;
 mod proxy;
 mod report;
 mod verify;
+mod volume;
 
 use base64::Engine;
 use cli::{Backend, Mode, Options};
@@ -182,6 +183,25 @@ async fn run_command(
     let attribute_cargo = !options.no_attribute
         && executable.is_some_and(|name| name == "cargo")
         && std::env::var_os("RUSTC_WRAPPER").is_none();
+    let mut limits = comparison
+        .as_ref()
+        .map(|session| session.volume_limits(options.backend))
+        .unwrap_or_default();
+    for (host, sent_bytes) in policy.limits() {
+        limits.insert(
+            host.clone(),
+            volume::Sample {
+                sent_bytes: *sent_bytes,
+                connections: u64::MAX,
+                max_connection_bytes: *sent_bytes,
+            },
+        );
+    }
+    let enforce = options.mode == Mode::Restrict || options.comparison.ci;
+    let budgets = limits
+        .into_iter()
+        .map(|(host, limit)| (host, volume::Budget::new(limit, enforce)))
+        .collect();
     let proxy = Arc::new(proxy::Proxy {
         mode: options.mode,
         policy,
@@ -202,6 +222,7 @@ async fn run_command(
         attribute_npm: attribute_npm || attribute_cargo,
         compare_unauthenticated: options.comparison.ci,
         records: report::Records::default(),
+        budgets,
         dns_attempts: (options.backend == Backend::Isolated).then(Default::default),
         incomplete: AtomicBool::new(false),
         interfaces: proxy::host_interfaces()?,
@@ -284,6 +305,8 @@ async fn run_command(
         .as_ref()
         .map(|records| records.lock().unwrap().values().cloned().collect());
     let dns = attempted.as_deref().unwrap_or_default();
+    let volume_anomalies = volume::anomalies(&destinations, &proxy.budgets);
+    let volume_blocked = volume_anomalies.iter().any(|item| item.blocked);
     let unknown = destinations
         .iter()
         .any(|destination| destination.reason == "unknown_destination");
@@ -293,6 +316,8 @@ async fn run_command(
         (SETUP_FAILURE, "incomplete_capture")
     } else if options.fail_on_unknown && unknown {
         (UNKNOWN_DESTINATION, "unknown_destination")
+    } else if volume_blocked {
+        (volume::LIMIT_EXCEEDED, "volume_limit_exceeded")
     } else {
         let code = status.map(isolation::shell_exit).unwrap_or(SETUP_FAILURE);
         (
@@ -338,6 +363,37 @@ async fn run_command(
         }
         Backend::Isolated => "unconfirmed",
     };
+    for item in &volume_anomalies {
+        let mut sources = item
+            .attribution
+            .iter()
+            .filter_map(|a| a.package.as_ref())
+            .peekable();
+        let label = if sources.peek().is_none() {
+            "unknown / 特定できません".into()
+        } else {
+            sources
+                .map(|p| {
+                    format!(
+                        "{}@{} {} ({}), inferred / 推定",
+                        p.name, p.version, p.script, p.path
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" | ")
+        };
+        eprintln!(
+            "veil-tell: volume anomaly / 送信量の異常: {}:{} sent {}/{} bytes, connections {}/{}, max connection {}/{} bytes ← {label}",
+            item.host,
+            item.port,
+            item.observed.sent_bytes,
+            item.limits.sent_bytes,
+            item.observed.connections,
+            item.limits.connections,
+            item.observed.max_connection_bytes,
+            item.limits.max_connection_bytes
+        );
+    }
     for attempt in dns {
         for source in &attempt.attribution {
             let label = source
@@ -369,7 +425,7 @@ async fn run_command(
                 .iter()
                 .any(|event| event.reason == "new_destination")
                 || session.has_new_attempt(dns));
-        let mut diff = if exit_code == 0 || ci_denial {
+        let mut diff = if exit_code == 0 || ci_denial || volume_blocked && options.comparison.ci {
             match session.finish(options.backend, &destinations, dns) {
                 Ok(diff) => diff,
                 Err(error) => {
@@ -381,7 +437,7 @@ async fn run_command(
         } else {
             baseline::Comparison::skipped()
         };
-        if ci_denial {
+        if ci_denial || volume_blocked && options.comparison.ci {
             diff.retain_additions();
         }
         if diff.has_new() && (options.comparison.fail_on_new || options.comparison.ci) {
@@ -420,6 +476,7 @@ async fn run_command(
         child_status: status.map(Into::into),
         run_status: RunStatus { exit_code, reason },
         destinations,
+        volume_anomalies,
         attempted,
         comparison,
     };

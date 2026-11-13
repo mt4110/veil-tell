@@ -30,6 +30,7 @@ pub struct Proxy {
     pub attribute_npm: bool,
     pub compare_unauthenticated: bool,
     pub records: Records,
+    pub budgets: std::collections::BTreeMap<String, crate::volume::Budget>,
     pub dns_attempts: Option<std::sync::Mutex<std::collections::BTreeMap<String, Attempted>>>,
     pub incomplete: AtomicBool,
     pub interfaces: Vec<IpAddr>,
@@ -143,6 +144,7 @@ struct Exchange<'a> {
 
 impl Drop for Exchange<'_> {
     fn drop(&mut self) {
+        self.event.max_connection_bytes = self.event.sent_bytes;
         if !self.state.records.add(self.event.clone()) {
             self.state.incomplete.store(true, Ordering::Relaxed);
         }
@@ -334,6 +336,7 @@ where
             connected_ip: None,
             attempts: 1,
             sent_bytes: 0,
+            max_connection_bytes: 0,
             received_bytes: 0,
             attribution: attribution.into_iter().collect(),
         },
@@ -342,6 +345,16 @@ where
         return response(&mut stream, AUTH_REQUIRED).await;
     }
     if !allowed {
+        return response(&mut stream, "403 Forbidden").await;
+    }
+    let budget = state
+        .budgets
+        .get(&exchange.event.host)
+        .filter(|b| b.enforce);
+    if let Some(budget) = budget
+        && !budget.connect().await
+    {
+        exchange.event.result = "volume_blocked";
         return response(&mut stream, "403 Forbidden").await;
     }
     let addresses = match resolve(state, &exchange.event.host).await {
@@ -375,16 +388,23 @@ where
             &mut incoming,
             &mut to_upstream,
             &bytes[consumed..],
-            &mut event.sent_bytes
+            &mut event.sent_bytes,
+            budget,
         ),
         pump(
             &mut from_upstream,
             &mut outgoing,
             &[],
-            &mut event.received_bytes
+            &mut event.received_bytes,
+            None,
         ),
     );
-    event.result = if result.is_ok() {
+    event.result = if result.as_ref().err().is_some_and(|err| {
+        err.get_ref()
+            .is_some_and(|source| source.is::<crate::volume::Exceeded>())
+    }) {
+        "volume_blocked"
+    } else if result.is_ok() {
         "completed"
     } else {
         "transfer_interrupted"
@@ -462,15 +482,16 @@ async fn pump(
     writer: &mut (impl AsyncWrite + Unpin),
     prefix: &[u8],
     count: &mut u64,
+    budget: Option<&crate::volume::Budget>,
 ) -> io::Result<()> {
-    transfer(writer, prefix, count).await?;
+    transfer(writer, prefix, count, budget).await?;
     let mut buffer = [0; 8192];
     loop {
         let length = timeout(IDLE_LIMIT, reader.read(&mut buffer)).await??;
         if length == 0 {
             return writer.shutdown().await;
         }
-        transfer(writer, &buffer[..length], count).await?;
+        transfer(writer, &buffer[..length], count, budget).await?;
     }
 }
 
@@ -478,9 +499,13 @@ async fn transfer(
     writer: &mut (impl AsyncWrite + Unpin),
     mut bytes: &[u8],
     count: &mut u64,
+    budget: Option<&crate::volume::Budget>,
 ) -> io::Result<()> {
     while !bytes.is_empty() {
-        let written = timeout(IDLE_LIMIT, writer.write(bytes)).await??;
+        let written = match budget {
+            Some(budget) => budget.write(writer, bytes, *count, IDLE_LIMIT).await?,
+            None => timeout(IDLE_LIMIT, writer.write(bytes)).await??,
+        };
         if written == 0 {
             return Err(io::ErrorKind::WriteZero.into());
         }

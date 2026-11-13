@@ -230,6 +230,57 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
             cargo_destination_diff(cli, project, evidence)
 
 
+def volume_test(fixture, project, evidence):
+    policy = evidence / "volume.toml"
+    policy.write_text('version = 1\nprofile = "volume"\n[[rule]]\n'
+                      'action = "allow"\nhost = "allowed.test"\nport = 443\nmax_sent_bytes = 8192\n')
+    baseline = evidence / "volume-baseline.json"
+    with socket.socket() as receiver:
+        receiver.bind((os.environ.get("VEIL_TELL_TEST_IP", "127.0.0.1"), 0))
+        receiver.listen()
+        receiver.settimeout(5)
+        address = f"{receiver.getsockname()[0]}:{receiver.getsockname()[1]}"
+        env = dict(os.environ, VEIL_TELL_FIXTURE_RECEIVER=address)
+        for name, arguments, sent, expected, code in [
+            ("train", ["observe", "--baseline-out", baseline], 4096, 4096, 0),
+            ("observe", ["observe", "--baseline", baseline], 524288, 524288, 0),
+            ("restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
+            ("ci", ["ci", "--baseline", baseline], 524288, 131072, 22),
+        ]:
+            received = []
+
+            def collect():
+                conn, _ = receiver.accept()
+                with conn, conn.makefile("rb") as data:
+                    conn.settimeout(4)
+                    received.append(len(data.read()))
+                    try:
+                        conn.sendall(b"ACK")
+                    except OSError:
+                        pass
+
+            thread = threading.Thread(target=collect)
+            thread.start()
+            report = evidence / f"volume-{name}.json"
+            try:
+                child = subprocess.run(
+                    [fixture, *arguments, *([] if name == "ci" else ["--backend", "isolated"]),
+                     "--report", report, "--", sys.executable, "-B", "probe.py", "volume", str(sent)],
+                    cwd=project, env=env, capture_output=True, text=True, timeout=12,
+                )
+            finally:
+                thread.join()
+            assert child.returncode == code and received == [expected], (child.stderr, received)
+            result = json.loads(report.read_text())
+            assert result["child_status"]["exit_code"] == 0
+            assert result["destinations"][0]["sent_bytes"] == expected
+            if name != "train":
+                anomaly, = result["volume_anomalies"]
+                assert anomaly["blocked"] == (code == 22), result
+                print(next(line for line in child.stderr.splitlines() if "volume anomaly" in line))
+            print(f"receiver case=volume-{name} os={sys.platform} bytes={expected} child=0 exit={code}")
+
+
 def dns_attempt_test(cli, project, evidence, runtime):
     demo = project / "dns-attempts"
     demo.mkdir()
@@ -595,6 +646,7 @@ def run(cli, fixture, node_root=None):
             assert child.returncode == 0 and "EBADF" in child.stdout, (child.stdout, child.stderr)
             assert receive(receiver, 1) == [b""]
             print("receiver case=inherited-fd connections=1 payload_bytes=0 errno=EBADF")
+        volume_test(fixture, project, evidence)
         destination_diff_test(cli, fixture, project, evidence, node_root)
         if node_root:
             npm_test(fixture, Path(node_root).resolve(), project, evidence, policies["allow"], ip)
@@ -680,6 +732,23 @@ if __name__ == "__main__":
     elif sys.argv[1] == "observe-candidates":
         connect_probe("ALLOWED.test.", "first")
         connect_probe("allowed.test", "second")
+    elif sys.argv[1] == "volume":
+        proxy = urlsplit(os.environ["HTTPS_PROXY"])
+        credentials = base64.b64encode(f"{proxy.username}:{proxy.password}".encode()).decode()
+        with socket.create_connection((proxy.hostname, proxy.port), timeout=5) as conn:
+            conn.sendall((f"CONNECT allowed.test:443 HTTP/1.1\r\n"
+                          f"Proxy-Authorization: Basic {credentials}\r\n\r\n").encode())
+            with conn.makefile("rb") as stream:
+                assert b" 200 " in stream.readline()
+                for line in stream:
+                    if line == b"\r\n":
+                        break
+                try:
+                    conn.sendall(b"X" * int(sys.argv[2]))
+                    conn.shutdown(socket.SHUT_WR)
+                    stream.read()
+                except (ConnectionResetError, BrokenPipeError):
+                    pass
     elif sys.argv[1] == "fd":
         try:
             os.write(int(sys.argv[2]), b"inherited-fd")

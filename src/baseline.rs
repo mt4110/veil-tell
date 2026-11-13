@@ -62,12 +62,18 @@ struct Baseline {
     destinations: Vec<Endpoint>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     attempted: Vec<Attempted>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    volume: BTreeMap<String, crate::volume::Sample>,
 }
 
 impl Baseline {
     fn capture(backend: Backend, events: &[Destination]) -> Self {
+        let mut volume = BTreeMap::<String, crate::volume::Sample>::new();
         let mut counts = BTreeMap::<_, Endpoint>::new();
         for event in events {
+            if event.connected_ip.is_some() {
+                volume.entry(event.host.clone()).or_default().record(event);
+            }
             let endpoint = counts
                 .entry((event.host.clone(), event.port))
                 .or_insert_with(|| Endpoint {
@@ -88,6 +94,7 @@ impl Baseline {
             lockfile: None,
             destinations: counts.into_values().collect(),
             attempted: Vec::new(),
+            volume,
         }
     }
 
@@ -112,6 +119,15 @@ impl Baseline {
             return Err(error(
                 "invalid baseline destinations; use sorted unique canonical hosts on port 443 with positive counts",
             ));
+        }
+        if self.volume.iter().any(|(host, sample)| {
+            self.destinations
+                .binary_search_by(|entry| entry.host.cmp(host))
+                .is_err()
+                || sample.max_connection_bytes > sample.sent_bytes
+                || sample.connections == 0
+        }) {
+            return Err(error("invalid baseline volume sample"));
         }
         if self.attempted.len() > 1024
             || self
@@ -550,6 +566,20 @@ impl Session {
         })
     }
 
+    pub fn volume_limits(&self, backend: Backend) -> BTreeMap<String, crate::volume::Sample> {
+        self.before
+            .as_ref()
+            .filter(|before| before.backend == backend)
+            .map(|before| {
+                before
+                    .volume
+                    .iter()
+                    .map(|(host, sample)| (host.clone(), sample.limits()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn ci_endpoints(&self) -> Result<std::collections::BTreeSet<String>> {
         Ok(self
             .before
@@ -609,8 +639,14 @@ impl Session {
             if let Some(before) = before {
                 let diff = before.compare(&current);
                 if diff.has_new() {
-                    let mut current = current;
+                    let samples = std::mem::take(&mut current.volume);
                     current.destinations.extend(diff.removed.iter().cloned());
+                    current.volume = before.volume.clone();
+                    for entry in &diff.added {
+                        if let Some(sample) = samples.get(&entry.host) {
+                            current.volume.insert(entry.host.clone(), sample.clone());
+                        }
+                    }
                     let attempts: BTreeMap<_, _> = before
                         .attempted
                         .iter()
@@ -725,6 +761,7 @@ mod tests {
             connected_ip: None,
             attempts,
             sent_bytes: 0,
+            max_connection_bytes: 0,
             received_bytes: 0,
             attribution: Default::default(),
         }

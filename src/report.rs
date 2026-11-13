@@ -27,6 +27,7 @@ pub struct Destination {
     pub connected_ip: Option<IpAddr>,
     pub attempts: u64,
     pub sent_bytes: u64,
+    pub max_connection_bytes: u64,
     pub received_bytes: u64,
     #[serde(skip_serializing_if = "crate::attribution::Sources::is_empty")]
     pub attribution: crate::attribution::Sources,
@@ -63,6 +64,8 @@ impl Records {
             .and_modify(|total| {
                 total.attempts += event.attempts;
                 total.sent_bytes += event.sent_bytes;
+                total.max_connection_bytes =
+                    total.max_connection_bytes.max(event.max_connection_bytes);
                 total.received_bytes += event.received_bytes;
                 for source in &event.attribution {
                     crate::attribution::record(&mut total.attribution, source.clone());
@@ -87,6 +90,8 @@ pub struct Report {
     pub child_status: Option<ChildStatus>,
     pub run_status: RunStatus,
     pub destinations: Vec<Destination>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub volume_anomalies: Vec<crate::volume::Anomaly>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attempted: Option<Vec<Attempted>>,
     #[serde(skip_serializing_if = "Option::is_none")]

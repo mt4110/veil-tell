@@ -114,3 +114,7 @@ veil-tell: attempted (blocked) / 名前解決を拒否: postinstall.invalid ← 
 ```
 
 同じ試験で 1,025 個の異なる名前を渡すと、1,024 件まで記録し、JSON の `coverage.dns_attempts` が `incomplete`、終了コードが 125 になる。
+
+### 許可済みトンネルの送信上限
+
+受信側試験では、同じローカル宛先に 524,288 バイトを送信した。`observe` では受信側に全量が届き、終了コード 0 と送信量の異常が記録された。`restrict` の明示上限では 8,192 バイト、基準を使う `ci` では1接続の下限にあたる 131,072 バイトで転送が止まり、子は 0、veil-tell は 22 になった。JSON の `volume_anomalies` では `blocked` と計測値・上限を確認できる。[しきい値と範囲](volume-limits.md)

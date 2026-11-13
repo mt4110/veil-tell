@@ -20,6 +20,7 @@ struct Rule {
     action: Action,
     host: String,
     port: u16,
+    max_sent_bytes: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -32,7 +33,10 @@ struct PolicyFile {
 }
 
 #[derive(Clone, Default)]
-pub struct Policy(BTreeMap<String, Action>);
+pub struct Policy {
+    rules: BTreeMap<String, Action>,
+    limits: BTreeMap<String, u64>,
+}
 
 impl Policy {
     pub fn read(path: &Path) -> Result<Self> {
@@ -48,36 +52,47 @@ impl Policy {
         if file.version != 1 || file.profile.trim().is_empty() {
             return Err(error("expected policy version 1 and a nonempty profile"));
         }
-        let mut policy = BTreeMap::new();
+        let mut policy = Self::default();
         for rule in file.rule {
             let host =
                 normalize_host(&rule.host).ok_or_else(|| error("invalid policy hostname"))?;
             if rule.port != 443 {
                 return Err(error("only policy port 443 is supported"));
             }
-            if policy.insert(host.clone(), rule.action).is_some() {
+            if policy.rules.insert(host.clone(), rule.action).is_some() {
                 return Err(error(format!("duplicate policy destination: {host}:443")));
             }
+            if let Some(limit) = rule.max_sent_bytes {
+                if !matches!(rule.action, Action::Allow) {
+                    return Err(error("max_sent_bytes requires an allow rule"));
+                }
+                policy.limits.insert(host, limit);
+            }
         }
-        Ok(Self(policy))
+        Ok(policy)
     }
 
     pub fn denying(&self, host: &str) -> Result<Self> {
-        if !matches!(self.0.get(host), Some(Action::Allow)) {
+        if !matches!(self.rules.get(host), Some(Action::Allow)) {
             return Err(error(format!(
                 "{host}:443 must have an explicit allow rule"
             )));
         }
         let mut policy = self.clone();
-        policy.0.insert(host.to_owned(), Action::Deny);
+        policy.rules.insert(host.to_owned(), Action::Deny);
+        policy.limits.remove(host);
         Ok(policy)
+    }
+
+    pub fn limits(&self) -> &BTreeMap<String, u64> {
+        &self.limits
     }
 
     pub fn decision(&self, mode: Mode, host: &str) -> (bool, &'static str) {
         if mode == Mode::Observe {
             return (true, "observe");
         }
-        match self.0.get(host) {
+        match self.rules.get(host) {
             Some(Action::Allow) => (true, "allow_rule"),
             Some(Action::Deny) => (false, "explicit_deny"),
             None => (false, "unknown_destination"),
