@@ -33,7 +33,9 @@ jobs:
       - uses: mt4110/veil-tell@v0
 ```
 
-`@v0` は v0.4.0 の署名付き配布とタグの公開後に利用できます。 [移行・隔離・検証結果の読み方](docs/destination-diff.md)
+### 公開版 v0.4.0 の GitHub Actions 実測
+
+`uses: mt4110/veil-tell@v0` を macOS 26 と Ubuntu 26.04 で実行し、**変更なしは `0`、新規宛先の拒否は `21`、送信量超過による切断は `22`** を確認しました。両 OS で、送信量超過時は受信ログと JSON が **131,072 バイト**で一致しました。 [macOS の実行](https://github.com/mt4110/veil-tell/actions/runs/43459261848) · [Ubuntu の実行](https://github.com/mt4110/veil-tell/actions/runs/43410515308) · [ジョブ要約・JSON・受信ログの読み方](docs/runbook.md#8-公開版-v040-の-github-actions-実測)
 
 対応する macOS と Linux で **sudo なし**で使える、**コマンド単位**の通信先チェックです。ローカルプロキシに届いた HTTP CONNECT を記録し、制限モードでは未登録の CONNECT を拒否して **CI を失敗**させられます。veil-tell 自体はテレメトリーを送りません。
 

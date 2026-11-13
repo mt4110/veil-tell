@@ -515,3 +515,44 @@ jq '{
     {host, port, reason, result, sent_bytes, received_bytes}]
 }' reports/workflow.json reports/audit.json
 ```
+
+## 8. 公開版 v0.4.0 の GitHub Actions 実測
+
+GitHub ホストの macOS 26 と Ubuntu 26.04 で `uses: mt4110/veil-tell@v0` を実行しました。Action が公開アーカイブの来歴を検証し、隔離した `npm run postinstall` で架空のパッケージ `veil-release-smoke@1.0.0` の3ケースを試しました。受信口は各ランナー内に置きました。 [macOS の実行](https://github.com/mt4110/veil-tell/actions/runs/43459261848) · [Ubuntu の実行](https://github.com/mt4110/veil-tell/actions/runs/43410515308)
+
+### 成果物の取得
+
+実行ページの **Summary** で Action のジョブ要約を確認できます。**Artifacts** から `smoke-unchanged`、`smoke-new`、`smoke-volume` を取得します。各成果物には `summary.md` と `report.json` が入っています。macOS には3ケースすべて、Ubuntu には送信量超過ケースの `receiver.log` が入っています。
+
+```bash
+repo=mt4110/veil-tell
+for platform in macos ubuntu; do
+  case "$platform" in
+    macos) run_id=43459261848 ;;
+    ubuntu) run_id=43410515308 ;;
+  esac
+  gh run download "$run_id" --repo "$repo" --pattern 'smoke-*' --dir "reports/$platform"
+done
+```
+
+### ジョブ要約・JSON・受信ログを照合する
+
+| 成果物 | 終了コードと JSON | ジョブ要約 | 受信ログ |
+| --- | --- | --- | --- |
+| `smoke-unchanged` | `0`、`run_status.reason: completed`、`comparison.added` は空 | 新しい送り先・試み・送信量の異常なし | macOS は0接続・0バイト。Ubuntu はログ添付なし |
+| `smoke-new` | `21`、`new_destination`、`comparison.added` に `new.test:443`、`destinations[].result: blocked` | `CONNECT` の行に宛先と `postinstall` の推定帰属 | macOS は0接続・0バイト。Ubuntu はログ添付なし |
+| `smoke-volume` | `22`、`volume_limit_exceeded`、`volume_anomalies[].blocked: true` | `Volume anomaly` の行に `volume.test:443` と `postinstall` の推定帰属 | 送信を試みた524,288バイトのうち、両 OS とも131,072バイトで停止 |
+
+`child_status.exit_code` は全ケースで `0` でした。veil-tell の終了コードは `run_status.exit_code` で確認します。検証ワークフローは `21` と `22` の Action ステップの失敗を捕捉して成果物をアップロードし、期待値との照合に成功したためジョブ全体は成功しています。
+
+```bash
+jq '{
+  child_exit: .child_status.exit_code,
+  run_status,
+  added: (.comparison.added // []),
+  results: [.destinations[] | {host, port, result}],
+  volume: [.volume_anomalies[]? | {host, blocked, observed, limits, attribution}]
+}' reports/*/smoke-*/report.json
+```
+
+送信量超過の `observed.sent_bytes` と `limits.max_connection_bytes` はどちらも `131072` です。両 OS の `receiver.log` で `received=131072` と一致することを確認できます。

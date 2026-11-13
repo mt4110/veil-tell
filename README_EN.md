@@ -33,7 +33,9 @@ jobs:
       - uses: mt4110/veil-tell@v0
 ```
 
-`@v0` becomes usable once the attested v0.4.0 binaries and tag are published. [Migration, isolation, and test output](docs/destination-diff.md)
+### GitHub Actions results for v0.4.0
+
+We ran `uses: mt4110/veil-tell@v0` on macOS 26 and Ubuntu 26.04 and confirmed **`0` for no change, `21` for a blocked new destination, and `22` when the tunnel exceeded its outbound volume limit**. In the volume test, the receiver log and JSON agreed on **131,072 bytes** on both platforms. [macOS run](https://github.com/mt4110/veil-tell/actions/runs/43459261848) · [Ubuntu run](https://github.com/mt4110/veil-tell/actions/runs/43410515308) · [Reading job summaries, JSON, and receiver logs (Japanese)](docs/runbook.md#8-公開版-v040-の-github-actions-実測)
 
 Check network destinations **one command at a time**, **without sudo** on supported macOS and Linux systems. veil-tell records HTTP CONNECT requests that reach its local proxy. In restrict mode it can deny unlisted CONNECT requests and **fail a CI job**. veil-tell sends no telemetry of its own.
 
