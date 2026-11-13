@@ -192,7 +192,7 @@ PY
 
 ### GitHub Actions の配布物と来歴を確認する
 
-[配布ビルドのワークフロー](../.github/workflows/release-build.yml) は GitHub ホストの macOS 26 arm64 と Ubuntu 26.04 x86_64 で動きます。手動実行で動作を確認でき、配布候補は Cargo のバージョンと一致するタグ（例 `v0.1.0`）から作ります。各ジョブはアーカイブと中の実行ファイルに来歴証明を作成します。集約ジョブは両アーカイブの SHA-256 を再照合し、アーカイブ2件と `SHA256SUMS` を `veil-tell-distribution` という Actions アーティファクトにまとめます。
+[配布ビルドのワークフロー](../.github/workflows/release-build.yml) は GitHub ホストの macOS 26 arm64 と Ubuntu 26.04 x86_64 で動きます。Cargo のバージョンと一致する `vMAJOR.MINOR.PATCH` タグ（例 `v0.4.0`）を push すると起動します。各ジョブはアーカイブと中の実行ファイルに来歴証明を作成します。集約ジョブは両アーカイブの SHA-256 を再照合し、アーカイブ2件と `SHA256SUMS` を `veil-tell-distribution` という Actions アーティファクトにまとめます。
 
 GitHub CLI を用意して `gh auth login` で認証します。配布ページから取得したアーカイブ2件と `SHA256SUMS` を同じディレクトリに置き、上の手順で SHA-256 を照合します。配布前の確認では、成功した Actions 実行の ID を指定して同じ3ファイルを取得できます。
 
@@ -200,7 +200,7 @@ GitHub CLI を用意して `gh auth login` で認証します。配布ページ�
 gh run download RUN_ID --repo mt4110/veil-tell --name veil-tell-distribution
 ```
 
-アーカイブを展開する前に、来歴証明を照合します。以下はタグ `v0.1.0` の例です。ファイル名と `tag` を対象のリリースに合わせます。ブランチから手動実行した成果物の動作確認では、`--source-ref` に `refs/heads/main` など実行時のブランチを指定します。
+アーカイブを展開する前に、来歴証明を照合します。以下はタグ `v0.1.0` の例です。ファイル名と `tag` を対象のリリースに合わせます。
 
 ```sh
 (
