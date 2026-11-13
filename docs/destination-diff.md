@@ -52,19 +52,34 @@ fixture os=linux cargo=build.rs exit=21 cached_connects=0
 
 ロック上の版や integrity が同じでも、インストール後のファイルの差し替えや、環境変数・キャッシュなどをきっかけに動くコードはあり得ます。帰属情報自体も偽装できます。比較が示すのはプロキシで観測した宛先と依存記録の変化です。Cargo の proc-macro のように同一プロセス内に複数の実行主体がある場合は個別の帰属は得られません。 [方式と制約](design.md#ロックファイルと-cargo-の帰属)
 
-## 依存更新 PR で使う
+## v0.4.0 の実測
 
-普段の `npm ci` と同じ条件で観測し、観測した宛先をレビューしてから `.veil-tell/npm-ci.json` を Git に追加します。
+macOS と Ubuntu で空の npm キャッシュから `is-number@7.0.0` を取得し、`registry.npmjs.org` を基準に記録しました。同じ `veil-tell npm install` を5回、`veil-tell npm install --offline` を1回実行して、承認待ちができないことを確認しました。その基準で `veil-tell ci -- npm ci` も終了コード `0` でした。
 
-```sh
-mkdir -p .veil-tell
-veil-tell observe --baseline-out .veil-tell/npm-ci.json -- npm ci
-git add .veil-tell/npm-ci.json
+```text
+veil-tell: No new destinations / 新しい送り先はありません
+cold=registry.npmjs.org warm_repeats=5 approvals=0 offline=0 install_to_ci=0
 ```
 
-端末で `veil-tell ci -- npm ci` とだけ実行する場合は、先に `veil-tell npm ci` で同じ引数の既定基準を作成します。CI では引数のハッシュで特定した基準を使います。指定したファイルを使う場合は `veil-tell ci --baseline .veil-tell/npm-ci.json -- npm ci` です。Linux でユーザー領域に Node.js を導入している場合は、隔離内から見えるよう作業ディレクトリの下にランタイムを置いて PATH に加えます。
+依存更新の fixture は上記のロックファイル試験で再現できます。オプションによる帰属の有効化なしで、更新されたパッケージ名・版・スクリプトと終了コード `21` が出ます。
 
-以下は Dependabot と Renovate を含む依存更新 PR を、通常の PR と同じ読み取り権限で検査する例です。veil-tell の Composite Action を公開した後は、利用側で `@v0` を使用できます。開発中は同じリポジトリの checkout に対して `uses: ./` で呼べます。
+```text
+veil-tell: new_destination (exit 21). Recorded HTTP CONNECT requests: 1. Direct connection attempts are outside the capture scope.
+postinstall.local:443 ← veil-tell-demo-postinstall@1.0.0 postinstall (postinstall) [inferred / 推定, lockfile: 0.9.0→1.0.0 / 裏づけあり]
+```
+
+## 依存更新 PR で使う
+
+ローカルで `veil-tell npm install` を実行し、`.veil-tell/npm.json` をレビューして Git に追加します。`npm install`、`npm i`、`npm ci` は同じ基準を使います。
+
+```sh
+veil-tell npm install
+git add .veil-tell/npm.json
+```
+
+古いハッシュ名の基準がある場合は、同じ引数でローカル実行すると移行されます。別の引数で作った基準は内容をレビューし、`veil-tell migrate-baseline npm FILE` で移行します。指定ファイルを使う場合は `veil-tell ci --baseline FILE -- npm ci` です。Linux でユーザー領域に Node.js を導入している場合は、隔離内から見えるよう作業ディレクトリの下にランタイムを置いて PATH に加えます。
+
+以下は Dependabot と Renovate を含む依存更新 PR を、通常の PR と同じ読み取り権限で検査する例です。veil-tell の Composite Action を公開した後は、利用側で `@v0` を使用できます。Action は対応ランナー用の配布アーカイブを取得し、展開前にリリースワークフローとタグの来歴を照合します。
 
 ```yaml
 name: Check npm destinations
@@ -88,4 +103,4 @@ jobs:
           path: ${{ steps.veil.outputs.report }}
 ```
 
-Action は PR のベースコミットから基準とロックファイルを読み、新規宛先と推定した npm の発信元をジョブ要約の表に表示します。通常の PR に含まれる基準の変更は、同じ PR の判定に使われません。必須チェックにする場合は、ワークフロー自体をベース側で管理してください。比較結果は v1 レポートの `comparison` に入り、`run_status` の `new_destination` と終了コード `21` で CI の失敗理由を確認できます。接続先の消失と大きな回数変化は表示されます。 [形式・判定条件](design.md#v030-宛先の差分チェック)
+Action は PR のベースコミットから基準とロックファイルを読み、新規宛先と推定した npm の発信元をジョブ要約の表に表示します。通常の PR に含まれる基準の変更は、同じ PR の判定に使われません。必須チェックにする場合は、ワークフロー自体をベース側で管理してください。比較結果は v1 レポートの `comparison` に入り、`run_status` の `new_destination` と終了コード `21` で CI の失敗理由を確認できます。既知の接続先が見えなかった場合はローカル出力にだけ短く示し、承認待ちを作りません。回数変化は JSON で確認できます。PR コメントは既定で無効です。必要な場合は Action に `pr-comment: true` とジョブに `pull-requests: write` を設定します。書き込み権限のない PR ではジョブ要約を使います。 [形式・判定条件](design.md#v030-宛先の差分チェック)

@@ -322,3 +322,15 @@ Cargo は `CARGO_PKG_NAME`、`CARGO_PKG_VERSION`、`CARGO_MANIFEST_DIR` を実�
 Cargo の不安定な `host.runner` は将来、生成物に手を加えず起動を包む選択肢になる。実行ファイル名と PID だけを使う推定は、OS 差・子孫への委譲・競合が残る。proc-macro は rustc と同じプロセス内で複数が動くため、rustc の起動情報から個々のマクロに帰属できない。プロキシに届いた CONNECT は引き続き記録・判定する。[Cargo build scripts](https://doc.rust-lang.org/cargo/reference/build-scripts.html) · [Cargo host.runner](https://doc.rust-lang.org/cargo/reference/unstable.html#host-config) · [Rust procedural macros](https://doc.rust-lang.org/reference/procedural-macros.html)
 
 pip を扱う場合は、PEP 517 フックを呼ぶ子プロセスの起動点でビルド対象名、ソース、バックエンド、フック名を記録し、隔離したビルド環境へ帰属情報を引き継ぐ必要がある。setuptools の `setup.py` もバックエンド経由で動く場合がある。バックエンドと、そのバックエンドがビルドする依存の帰属は区別が必要。[pip Build System Interface](https://pip.pypa.io/en/stable/reference/build-system/)
+
+## v0.4.0 の基準と既定動作
+
+npm と Cargo の短縮形と CI は、実行ディレクトリにある `.veil-tell/npm.json` または `.veil-tell/cargo.json` を使う。同じパッケージマネージャーの引数の違いを吸収する。その他のコマンドは引数のハッシュを維持する。同一引数で作った旧基準は短縮形が新しいファイルへコピーできる。引数が異なる旧基準は `veil-tell migrate-baseline npm FILE` などで、レビューしたファイルを選ぶ。CI は基準を自動更新しない。
+
+キャッシュはツール側で削除・強制更新せず、初回観測と人が承認した新規宛先の和集合を基準にする。実行時に見えなかった既知の宛先は情報表示だけで、承認候補や失敗にならない。回数変化は JSON に残す。温まったキャッシュで初回観測すると未観測の宛先は基準に含まれないため、CI と条件を揃えたい場合は、レビュー用の実行でも同じ依存キャッシュ条件を用いる。
+
+短縮形は隔離内で無害なコマンドの起動を確認してから対象を一度だけ起動する。プローブで隔離を使えなければ、理由と直接通信の観測範囲を表示してプロキシ観測を使う。CI は隔離を必須とする。短縮形の基準ディレクトリは子から書き込めないようにする。明示したレポートは `../state/report.json` のような兄弟ディレクトリに出力する。
+
+npm と Cargo の帰属はコマンド名から自動で有効にする。`--no-attribute` は帰属とロック照合を無効にする。npm の script-shell または設定ファイルの明示指定を検出した場合は、既存の設定を優先し、npm の帰属を無効にした理由を出す。設定済みのシェルが壊れている場合は npm のエラーを伝える。
+
+Action は公開版アーカイブをダウンロードし、リポジトリ・署名ワークフロー・リリースタグの来歴を検証してから展開する。PR のベースコミットから基準を読む。新規宛先があればジョブ要約に帰属とロック照合を表示し、新規宛先がなければ1行にする。PR コメントは明示的に有効にした場合に限る。

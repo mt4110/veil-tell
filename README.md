@@ -2,21 +2,35 @@
 
 [English](README_EN.md)
 
-対応する macOS と Linux で **sudo なし**で使える、**コマンド単位**の通信先チェックです。ローカルプロキシに届いた HTTP CONNECT を記録し、制限モードでは未登録の CONNECT を拒否して **CI を失敗**させられます。veil-tell 自体はテレメトリーを送りません。
-
-## npm の宛先を2回の実行で比べる
+## 使い方
 
 ```sh
 cargo install --locked --path .
+veil-tell npm install
+veil-tell ci -- npm ci
 ```
 
-npm プロジェクトで `veil-tell npm install` を2回実行します。初回は成功した実行の基準をプロジェクトの `.veil-tell/` に保存し、次回は追加・消失・大きな回数変化を表示します。差分を調べ、受け入れる場合は `veil-tell accept` を実行します。`baseline-*.json` は Git に追加でき、`pending.json` は承認待ちの作業用ファイルです。
+依存更新 PR 用の例です。先に `.veil-tell/npm.json` をレビューしてコミットします。
 
-CI では、同じ引数で作成した基準をコミットして `veil-tell ci -- npm ci` を実行します。隔離を有効にし、基準にない CONNECT を接続前に拒否して終了コード `21` を返します。基準の作成はローカルで `veil-tell npm ci` を実行して行います。観測範囲はローカルプロキシに届いた HTTP CONNECT で、直接通信の試行先と TLS の内容は範囲外です。 [依存更新 PR の設定・再現デモ](docs/destination-diff.md)
+```yaml
+name: Check npm destinations
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  destinations:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: mt4110/veil-tell@v0
+```
 
-npm の新規宛先には、取得できたパッケージ名・バージョン・スクリプト・相対パスを **推定（`inferred`）** として表示します。情報が取れなければ `unknown` です。スクリプトが環境やプロキシ認証情報を変更すると、帰属を消したり別パッケージらしく見せたりできます。帰属の値を変えても、プロキシに届いた有効な CONNECT の新規判定と CI の拒否条件は変わりません。 [実測と偽装時の挙動](docs/destination-diff.md)
+`@v0` は v0.4.0 の署名付き配布とタグの公開後に利用できます。 [移行・隔離・検証結果の読み方](docs/destination-diff.md)
 
-`package-lock.json` や `Cargo.lock` があれば、新規宛先の帰属に依存の変更との照合結果を添えます。`veil-tell cargo build` では `build.rs` のクレート名を推定できます。ロックファイルは依存記録の変化を示すもので、展開後のファイルや発信元の真正性は検証しません。Cargo のキャッシュでスクリプトが再実行されないと、その実行の接続は観測されません。 [npm・Cargo の実測と制約](docs/destination-diff.md)
+対応する macOS と Linux で **sudo なし**で使える、**コマンド単位**の通信先チェックです。ローカルプロキシに届いた HTTP CONNECT を記録し、制限モードでは未登録の CONNECT を拒否して **CI を失敗**させられます。veil-tell 自体はテレメトリーを送りません。
 
 ## 実測デモで通信先を閉じてみる
 
