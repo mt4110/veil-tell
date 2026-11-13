@@ -1,0 +1,93 @@
+name: Verify released veil-tell v0.4.0 Action
+on:
+  push:
+    branches: [verify/v0.4.0-action]
+permissions:
+  contents: read
+  attestations: read
+jobs:
+  action:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - case: unchanged
+            expected: 0
+            outcome: success
+          - case: new
+            expected: 21
+            outcome: failure
+          - case: volume
+            expected: 22
+            outcome: failure
+    name: Action / ${{ matrix.case }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare fixture
+        env:
+          CASE: ${{ matrix.case }}
+        run: |
+          set -euo pipefail
+          if [[ ! -x /usr/bin/bwrap ]]; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
+          mkdir -p .veil-tell
+          cat > package.json <<'JSON'
+          {"name":"veil-release-smoke","version":"1.0.0","private":true,"scripts":{"postinstall":"python3 -B probe.py"}}
+          JSON
+          printf 'update-notifier=false\n' > .npmrc
+          printf '%s\n' "$CASE" > case.txt
+          python3 -B tests/release-smoke.py prepare "$CASE"
+          if [[ "$CASE" == volume ]]; then
+            # Keep synthetic payload and DNS on this disposable runner.
+            # The host proxy's production address checks still execute.
+            sudo ip netns add veil-receiver
+            sudo ip link add veil-test-host type veth peer name veil-test-peer
+            sudo ip link set veil-test-peer netns veil-receiver
+            sudo ip addr add 192.0.1.1/30 dev veil-test-host
+            sudo ip link set veil-test-host up
+            sudo ip -n veil-receiver addr add 192.0.1.2/30 dev veil-test-peer
+            sudo ip -n veil-receiver link set veil-test-peer up
+            printf '192.0.1.2 volume.test\n' | sudo tee -a /etc/hosts >/dev/null
+            # shellcheck disable=SC2024 # the runner owns the evidence file
+            sudo ip netns exec veil-receiver python3 -u "$PWD/tests/release-smoke.py" receive               > "$RUNNER_TEMP/receiver.log" 2>&1 &
+            for _ in {1..20}; do
+              if grep -qx ready "$RUNNER_TEMP/receiver.log"; then break; fi
+              sleep 0.25
+            done
+            grep -qx ready "$RUNNER_TEMP/receiver.log"
+          fi
+      - uses: mt4110/veil-tell@v0
+        id: veil
+        continue-on-error: true
+        with:
+          command: npm run postinstall
+      - name: Check JSON, receiver and job summary
+        if: always()
+        env:
+          CASE: ${{ matrix.case }}
+          EXPECTED: ${{ matrix.expected }}
+          EXPECTED_OUTCOME: ${{ matrix.outcome }}
+          ACTION_OUTCOME: ${{ steps.veil.outcome }}
+          REPORT: ${{ steps.veil.outputs.report }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          if [[ -n "$REPORT" && -f "$REPORT" ]]; then
+            cp "$REPORT" "$RUNNER_TEMP/evidence/report.json"
+          fi
+          if [[ -f "$RUNNER_TEMP/receiver.log" ]]; then
+            cp "$RUNNER_TEMP/receiver.log" "$RUNNER_TEMP/evidence/receiver.log"
+          fi
+          python3 -B tests/release-smoke.py check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: smoke-${{ matrix.case }}
+          path: ${{ runner.temp }}/evidence/
+          if-no-files-found: error
