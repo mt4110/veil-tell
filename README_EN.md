@@ -16,6 +16,8 @@ For CI, run `veil-tell npm ci` locally, commit the baseline, and run `veil-tell 
 
 For new destinations in npm runs, veil-tell can show the package, version, lifecycle script, and relative path as `inferred`. It reports `unknown` when the context is unavailable. Scripts can alter environment variables or proxy credentials to erase or forge attribution. Destination checks and CI blocking for valid CONNECT requests that reach the proxy are independent of those labels. [Measured behavior and spoofing limits](docs/destination-diff.md)
 
+When `package-lock.json` or `Cargo.lock` is available, veil-tell can annotate new destinations with dependency changes. `veil-tell cargo build` can infer the crate behind a `build.rs` connection. Lockfile evidence describes recorded dependency changes. Installed files and the actual origin of a request remain unverified. A cached build script that does not rerun produces no connection to observe. [npm and Cargo examples and limits](docs/destination-diff.md)
+
 ## Can I block this destination?
 
 On macOS, we ran Prompt Recipe from the same source and lockfile, changing only the rule for `registry.npmjs.org:443`.

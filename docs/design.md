@@ -308,3 +308,17 @@ CONNECT で判別できる単位は正規化したホスト名と443番ポート
 実行レポートとベースラインは `schema_version: 1` のまま、各宛先に任意の `attribution` 配列を追加する。既存の v1 基準はそのまま読み込める。古いバイナリに基準を渡す場合は `attribution` を削除して使う。帰属は差分のキーに含めない。帰属情報が多い宛先では最大4件の推定と `unknown` を保持し、帰属だけを増やしても宛先の記録枠は消費しない。
 
 Harden-Runner も外向き通信をプロセスやコマンドに関連付ける。veil-tell がここで提供するのは、コマンドごとの差分に npm のパッケージ・バージョン・ライフサイクル・相対パスを付けて、JSON とジョブ要約に表示する機能。[Harden-Runner](https://github.com/step-security/harden-runner)
+
+### ロックファイルと Cargo の帰属
+
+`package-lock.json` v2/v3 と `Cargo.lock` v3/v4 を自動で要約する。基準の任意フィールド `lockfile` はエコシステムと、名前・バージョン・integrity または checksum のソート済み集合を保存する。URL、インストールパス、ロックファイル本文は保存しない。JSON は v1 を維持し、旧基準も読める。読み取れない、形式が異なる、入力が16 MiBまたは要約が128 KiBを超える場合は照合を見送る。pnpm と Yarn はロック形式とリンク先の照合が別途必要なため対象外。
+
+比較では追加・削除を集合の差で求め、同名で旧・新の差が各1件なら更新とする。新規 CONNECT の帰属先が追加・更新に一意に一致すれば `corroborated`、同じ名前・版が現行ロックに残り変更がなければ `unchanged`、帰属が不明で変更があれば `candidates` とする。候補には削除も含み、JSON の `comparison.lockfile_changes` で区別できる。ロックに帰属先がない場合や同じ名前・版の識別が曖昧な場合は裏づけを付けない。`comparison.lockfile_evidence` に各新規 CONNECT の注記を出す。宛先の照合と終了コードにロック情報は使わない。
+
+比較用のロックは実行前に読む。初回記録時にファイルがまだ存在しなければ、コマンドが生成したロックも基準に使える。Action は PR のベースコミットから基準とロックを取り出し、PR 側のロックの要約と照合する。PR 側の記述は変更候補を示す調査材料として扱う。integrity は取得アーカイブの情報なので、展開済み `node_modules` や Cargo のビルド時ソースをこの照合で再検証しない。パッケージマネージャーが不一致で失敗すれば、その子終了結果が従来どおり伝わる。改変された作業ツリー、同じ版のローカル依存の差し替え、実行時条件による発火、偽装された帰属は残る。ロックの一致が示すのは依存記録の変化であり、発信元の証明やインストール済みファイルの検証には使えない。[npm lockfile](https://docs.npmjs.com/cli/configuring-npm/package-lock-json/) · [npm ci](https://docs.npmjs.com/cli/commands/npm-ci/)
+
+Cargo は `CARGO_PKG_NAME`、`CARGO_PKG_VERSION`、`CARGO_MANIFEST_DIR` を実行時に照合する。安定版 Cargo の `RUSTC_WRAPPER` はコンパイルを包むため、そのままではビルドスクリプトの実行を観測できない。実装では Cargo が生成したビルドスクリプト用実行ファイルを検出し、元バイナリを同じ出力ディレクトリに保持して、起動時に環境を照合する。既存の環境変数 `RUSTC_WRAPPER` がある場合は追加のラッパーを挿入しない。生成形式が違う場合、マニフェストの継承などで照合できない場合、すでにコンパイル済みでラッパーがない場合は `unknown` になり得る。成果物は Cargo のターゲットディレクトリに残る。キャッシュ済みでスクリプトが再実行されなければ、その実行の CONNECT は0件。比較条件を揃えるには別々の空のターゲットディレクトリを使う。
+
+Cargo の不安定な `host.runner` は将来、生成物に手を加えず起動を包む選択肢になる。実行ファイル名と PID だけを使う推定は、OS 差・子孫への委譲・競合が残る。proc-macro は rustc と同じプロセス内で複数が動くため、rustc の起動情報から個々のマクロに帰属できない。プロキシに届いた CONNECT は引き続き記録・判定する。[Cargo build scripts](https://doc.rust-lang.org/cargo/reference/build-scripts.html) · [Cargo host.runner](https://doc.rust-lang.org/cargo/reference/unstable.html#host-config) · [Rust procedural macros](https://doc.rust-lang.org/reference/procedural-macros.html)
+
+pip を扱う場合は、PEP 517 フックを呼ぶ子プロセスの起動点でビルド対象名、ソース、バックエンド、フック名を記録し、隔離したビルド環境へ帰属情報を引き継ぐ必要がある。setuptools の `setup.py` もバックエンド経由で動く場合がある。バックエンドと、そのバックエンドがビルドする依存の帰属は区別が必要。[pip Build System Interface](https://pip.pypa.io/en/stable/reference/build-system/)
