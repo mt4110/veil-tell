@@ -89,7 +89,8 @@ Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. 
 
 ## Capture scope and known limitations
 
-- **Capture covers HTTP CONNECT requests that reach the local proxy.** `veil-tell COMMAND` records CONNECT requests from clients that honor the proxy settings. Direct connections can still succeed. Direct connection attempts are outside the capture scope. Zero recorded requests leaves direct network activity unknown.
+- **Capture includes HTTP CONNECT requests that reach the local proxy.** The proxy backend permits direct connections, which are outside its capture scope.
+- **Isolation also records supported Node.js lookup attempts.** The report identifies this as `coverage.dns_attempts: node_dns_lookup_hook`. Native system resolvers and direct IP attempts are outside this coverage. [Details](docs/dns-attempts.md)
 - **The isolated backend restricts direct connections at the OS level.** Both modes report `coverage.proxy = "http_connect_requests"` and `coverage.direct_attempt_destinations = "not_observed"` in JSON v1. The report omits details of OS-denied direct connections and IPC.
 - **Data can still leave through an allowed host.** For example, a child process may be able to send secrets to an allowed GitHub host or npm registry using credentials it can access or public upload features. The proxy tunnels TLS. HTTP methods, URL paths, and request bodies are outside its capture and control scope. An allow rule permits a tunnel to the host.
 

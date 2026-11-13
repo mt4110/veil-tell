@@ -89,7 +89,8 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 
 ## 観測範囲と既知の弱点
 
-- **観測対象はローカルプロキシに届いた HTTP CONNECT です。** `veil-tell COMMAND` では、プロキシ設定に従うクライアントの CONNECT を記録します。直接通信は通り得ます。直接通信の試行先は観測範囲外で、記録が0件でも直接通信の有無は分かりません。
+- **ローカルプロキシに届いた HTTP CONNECT を記録します。** プロキシ方式では直接通信も可能で、その試行先は観測範囲外です。
+- **隔離モードでは Node.js の名前解決の試みも記録します。** `coverage.dns_attempts` が `node_dns_lookup_hook` の場合に限ります。システムリゾルバや IP 直打ちの試みは範囲外です。[詳細](docs/dns-attempts.md)
 - **隔離モードは OS 側で直接通信を制限します。** JSON v1 の `coverage.proxy = "http_connect_requests"` と `coverage.direct_attempt_destinations = "not_observed"` は両モードに共通です。OS が拒否した直接通信や IPC の詳細は JSON に記録されません。
 - **許可したホスト経由の持ち出しは残ります。** たとえば、子プロセスが使える認証情報や公開アップロード機能を通じて、許可済みの GitHub や npm レジストリへ秘密情報を送れる場合があります。プロキシは TLS を終端せず、HTTP メソッド、URL パス、本文は観測・制御の範囲外です。ホストの許可は、そのホストへのトンネルを許可します。
 

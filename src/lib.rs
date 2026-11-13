@@ -202,6 +202,7 @@ async fn run_command(
         attribute_npm: attribute_npm || attribute_cargo,
         compare_unauthenticated: options.comparison.ci,
         records: report::Records::default(),
+        dns_attempts: (options.backend == Backend::Isolated).then(Default::default),
         incomplete: AtomicBool::new(false),
         interfaces: proxy::host_interfaces()?,
         fixture,
@@ -278,6 +279,11 @@ async fn run_command(
         }
     }
     let destinations = proxy.records.snapshot();
+    let attempted: Option<Vec<_>> = proxy
+        .dns_attempts
+        .as_ref()
+        .map(|records| records.lock().unwrap().values().cloned().collect());
+    let dns = attempted.as_deref().unwrap_or_default();
     let unknown = destinations
         .iter()
         .any(|destination| destination.reason == "unknown_destination");
@@ -332,15 +338,39 @@ async fn run_command(
         }
         Backend::Isolated => "unconfirmed",
     };
+    for attempt in dns {
+        for source in &attempt.attribution {
+            let label = source
+                .package
+                .as_ref()
+                .map(|pkg| {
+                    format!(
+                        "{}@{} {} ({}) [inferred / 推定]",
+                        pkg.name, pkg.version, pkg.script, pkg.path
+                    )
+                })
+                .unwrap_or_else(|| "unknown / 特定できません".into());
+            eprintln!(
+                "veil-tell: attempted (blocked) / 名前解決を拒否: {} ← {label}",
+                attempt.host
+            );
+        }
+    }
+    if attempted.is_some() && dns.is_empty() {
+        eprintln!(
+            "veil-tell: No Node.js DNS attempts recorded / Node.js の名前解決の試みは記録されませんでした"
+        );
+    }
     let comparison = if let Some(session) = comparison {
-        let ci_denial = options.comparison.ci
+        let ci_denial = (options.comparison.ci || options.comparison.fail_on_new)
             && reason == "child_failed"
             && status.is_some_and(|status| status.code().is_some())
-            && destinations
+            && (destinations
                 .iter()
-                .any(|event| event.reason == "new_destination");
+                .any(|event| event.reason == "new_destination")
+                || session.has_new_attempt(dns));
         let mut diff = if exit_code == 0 || ci_denial {
-            match session.finish(options.backend, &destinations) {
+            match session.finish(options.backend, &destinations, dns) {
                 Ok(diff) => diff,
                 Err(error) => {
                     eprintln!("veil-tell: {error}");
@@ -362,7 +392,7 @@ async fn run_command(
         None
     };
     eprintln!(
-        "veil-tell: {reason} (exit {exit_code}). Recorded HTTP CONNECT requests: {connect_requests}. Direct connection attempts are outside the capture scope."
+        "veil-tell: {reason} (exit {exit_code}). Recorded HTTP CONNECT requests: {connect_requests}. Direct sockets are outside the capture scope."
     );
     let result = Report {
         schema_version: 1,
@@ -372,6 +402,11 @@ async fn run_command(
         coverage: Coverage {
             proxy: "http_connect_requests",
             direct_attempt_destinations: "not_observed",
+            dns_attempts: match (attempted.is_some(), reason) {
+                (false, _) => "not_observed",
+                (true, "incomplete_capture") => "incomplete",
+                (true, _) => "node_dns_lookup_hook",
+            },
             proxy_capture: if reason == "proxy_stopped" {
                 "until_proxy_stopped"
             } else if reason == "incomplete_capture" {
@@ -385,6 +420,7 @@ async fn run_command(
         child_status: status.map(Into::into),
         run_status: RunStatus { exit_code, reason },
         destinations,
+        attempted,
         comparison,
     };
     if let Some(file) = report {

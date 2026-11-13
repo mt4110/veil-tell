@@ -2,7 +2,7 @@ use crate::Result;
 use crate::attribution::Attribution;
 use crate::cli::Mode;
 use crate::policy::{Policy, normalize_host};
-use crate::report::{Destination, Records};
+use crate::report::{Attempted, Destination, Records};
 use base64::Engine;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
@@ -30,6 +30,7 @@ pub struct Proxy {
     pub attribute_npm: bool,
     pub compare_unauthenticated: bool,
     pub records: Records,
+    pub dns_attempts: Option<std::sync::Mutex<std::collections::BTreeMap<String, Attempted>>>,
     pub incomplete: AtomicBool,
     pub interfaces: Vec<IpAddr>,
     pub fixture: Option<crate::FixtureResolver>,
@@ -169,6 +170,7 @@ async fn head(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
 enum Head {
     Accept {
         host: String,
+        dns: bool,
         consumed: usize,
         authorized: bool,
         attribution: Option<Attribution>,
@@ -189,7 +191,8 @@ fn parse(bytes: &[u8], auth: &str, attribute_npm: bool, compare_unauthenticated:
     if consumed > HEADER_LIMIT || request.version != Some(1) {
         return bad;
     }
-    if request.method != Some("CONNECT") {
+    let dns = request.method == Some("VEIL-DNS");
+    if !dns && request.method != Some("CONNECT") {
         return Head::Reject("405 Method Not Allowed");
     }
     if request.headers.iter().any(|header| {
@@ -228,20 +231,22 @@ fn parse(bytes: &[u8], auth: &str, attribute_npm: bool, compare_unauthenticated:
     if !authorized && !attribute_npm && !compare_unauthenticated {
         return Head::Reject(AUTH_REQUIRED);
     }
-    let Some((name, port)) = request
-        .path
-        .and_then(|authority| authority.rsplit_once(':'))
-    else {
-        return bad;
+    let Some(path) = request.path else { return bad };
+    let name = if dns {
+        path
+    } else {
+        match path.rsplit_once(':') {
+            Some((name, "443")) => name,
+            Some(_) => return Head::Reject("403 Forbidden"),
+            None => return bad,
+        }
     };
-    if port != "443" {
-        return Head::Reject("403 Forbidden");
-    }
     let Some(host) = normalize_host(name) else {
         return bad;
     };
     Head::Accept {
         host,
+        dns,
         consumed,
         authorized,
         attribution: attribute_npm.then(|| Attribution::decode(source.as_deref())),
@@ -264,7 +269,7 @@ where
         }
         Err(error) => return Err(error),
     };
-    let (host, consumed, authorized, attribution) = match parse(
+    let (host, dns, consumed, authorized, attribution) = match parse(
         &bytes,
         &state.auth,
         state.attribute_npm,
@@ -272,12 +277,39 @@ where
     ) {
         Head::Accept {
             host,
+            dns,
             consumed,
             authorized,
             attribution,
-        } => (host, consumed, authorized, attribution),
+        } => (host, dns, consumed, authorized, attribution),
         Head::Reject(status) => return response(&mut stream, status).await,
     };
+    if dns {
+        let Some(records) = &state.dns_attempts else {
+            return response(&mut stream, "405 Method Not Allowed").await;
+        };
+        if !authorized {
+            return response(&mut stream, AUTH_REQUIRED).await;
+        }
+        {
+            let mut records = records.lock().unwrap();
+            if records.len() >= 1024 && !records.contains_key(&host) {
+                state.incomplete.store(true, Ordering::Relaxed);
+            } else {
+                let attempt = records.entry(host.clone()).or_insert_with(|| Attempted {
+                    host,
+                    attempts: 0,
+                    attribution: Default::default(),
+                });
+                attempt.attempts += 1;
+                crate::attribution::record(
+                    &mut attempt.attribution,
+                    attribution.unwrap_or_else(Attribution::unknown),
+                );
+            }
+        }
+        return response(&mut stream, "403 Forbidden").await;
+    }
     let (allowed, reason) = if state
         .ci_hosts
         .as_ref()

@@ -104,3 +104,13 @@ jobs:
 ```
 
 Action は PR のベースコミットから基準とロックファイルを読み、新規宛先と推定した npm の発信元をジョブ要約の表に表示します。通常の PR に含まれる基準の変更は、同じ PR の判定に使われません。必須チェックにする場合は、ワークフロー自体をベース側で管理してください。比較結果は v1 レポートの `comparison` に入り、`run_status` の `new_destination` と終了コード `21` で CI の失敗理由を確認できます。既知の接続先が見えなかった場合はローカル出力にだけ短く示し、承認待ちを作りません。回数変化は JSON で確認できます。PR コメントは既定で無効です。必要な場合は Action に `pr-comment: true` とジョブに `pull-requests: write` を設定します。書き込み権限のない PR ではジョブ要約を使います。 [形式・判定条件](design.md#v030-宛先の差分チェック)
+
+### Node.js のプロキシを使わない名前解決
+
+`tests/receivers.py` の `dns_attempt_test` は、空の基準を作り、架空の npm スクリプトで `fetch` を実行する。JSON の `destinations` は空で、`comparison.attempted_added` に名前と推定帰属が入り、子の終了コード 0 に対して veil-tell は 21 を返す。
+
+```text
+veil-tell: attempted (blocked) / 名前解決を拒否: postinstall.invalid ← veil-dns-fixture@1.2.3 postinstall (.) [inferred / 推定]
+```
+
+同じ試験で 1,025 個の異なる名前を渡すと、1,024 件まで記録し、JSON の `coverage.dns_attempts` が `incomplete`、終了コードが 125 になる。

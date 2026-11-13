@@ -1,4 +1,4 @@
-use super::{Launch, restricted_env, set_proxy, shell_exit, supervise_stdio};
+use super::{Launch, NODE_DNS_HOOK, restricted_env, set_proxy, shell_exit, supervise_stdio};
 use crate::{Result, error, proxy::Listener};
 use std::ffi::OsString;
 use std::io;
@@ -11,6 +11,7 @@ use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 const RELAY_SOCKET: &str = "/veil-tell-proxy.sock";
+const DNS_HOOK: &str = "/veil-tell-node-dns.cjs";
 const RELAY_PROGRAM: &str = "/veil-tell-relay";
 
 pub async fn prepare(
@@ -107,6 +108,9 @@ pub async fn prepare(
             .arg(crate::cargo_attribution::LINUX_WRAPPER);
         launch.args(["--setenv", "VEIL_TELL_RELAY_CARGO", "1"]);
     }
+    let hook = temporary.path().join("node-dns.cjs");
+    std::fs::write(&hook, NODE_DNS_HOOK)?;
+    launch.arg("--ro-bind").arg(hook).arg(DNS_HOOK);
     launch.arg("--bind").arg(cwd).arg(cwd);
     for path in protected_dirs
         .iter()
@@ -145,7 +149,9 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
     let mut command = Command::new(&args[0]);
     command.args(&args[1..]).kill_on_drop(true);
     restricted_env(&mut command, Path::new("/tmp/veil-tell-home"));
-    set_proxy(&mut command, listener.local_addr()?.port(), secret);
+    let port = listener.local_addr()?.port();
+    set_proxy(&mut command, port, secret);
+    super::configure_node_dns(&mut command, Path::new(DNS_HOOK), port, secret)?;
     if std::env::var_os("VEIL_TELL_RELAY_NPM").is_some() {
         crate::attribution::configure(
             &mut command,

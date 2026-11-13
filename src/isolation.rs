@@ -42,7 +42,7 @@ pub async fn prepare(
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let wrapper = (attribute_npm || attribute_cargo)
+    let wrapper = (attribute_npm || attribute_cargo || backend == Backend::Isolated)
         .then(tempfile::tempdir)
         .transpose()?;
     let shell = wrapper
@@ -67,6 +67,8 @@ pub async fn prepare(
         #[cfg(target_os = "macos")]
         {
             let home = tempfile::tempdir()?;
+            let node_hook = wrapper.as_ref().unwrap().path().join("node-dns.cjs");
+            std::fs::write(&node_hook, NODE_DNS_HOOK)?;
             // Named Mach and XPC services can perform network I/O outside the sandbox.
             let mut profile = format!(
                 "(version 1)\n(allow default)\n(deny network*)\n\
@@ -90,6 +92,7 @@ pub async fn prepare(
             let mut launch = Command::new("/usr/bin/sandbox-exec");
             launch.args(["-p", &profile]).args(command);
             restricted_env(&mut launch, home.path());
+            configure_node_dns(&mut launch, &node_hook, port, secret)?;
             (launch, Some(home))
         }
         #[cfg(not(target_os = "macos"))]
@@ -154,6 +157,29 @@ pub fn restricted_env(command: &mut Command, home: &Path) {
     if std::env::var_os("PATH").is_none() {
         command.env("PATH", "/usr/local/bin:/usr/bin:/bin");
     }
+}
+
+pub const NODE_DNS_HOOK: &str = include_str!("node_dns.cjs");
+
+pub fn configure_node_dns(
+    command: &mut Command,
+    hook: &Path,
+    port: u16,
+    secret: &str,
+) -> Result<()> {
+    let hook = hook
+        .to_str()
+        .ok_or_else(|| error("the DNS hook path must be UTF-8"))?;
+    command
+        .env(
+            "NODE_OPTIONS",
+            format!("--require {}", serde_json::to_string(hook)?),
+        )
+        .env(
+            "VEIL_TELL_DNS_RELAY",
+            format!("http://veil:{secret}@127.0.0.1:{port}"),
+        );
+    Ok(())
 }
 
 pub const PROXY_VARS: [&str; 8] = [

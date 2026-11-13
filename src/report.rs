@@ -9,6 +9,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::Mutex;
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Attempted {
+    pub host: String,
+    pub attempts: u64,
+    pub attribution: crate::attribution::Sources,
+}
+
 #[derive(Clone, Serialize)]
 pub struct Destination {
     pub host: String,
@@ -80,6 +88,8 @@ pub struct Report {
     pub run_status: RunStatus,
     pub destinations: Vec<Destination>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempted: Option<Vec<Attempted>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub comparison: Option<Box<crate::baseline::Comparison>>,
 }
 
@@ -87,6 +97,7 @@ pub struct Report {
 pub struct Coverage {
     pub proxy: &'static str,
     pub direct_attempt_destinations: &'static str,
+    pub dns_attempts: &'static str,
     pub proxy_capture: &'static str,
 }
 

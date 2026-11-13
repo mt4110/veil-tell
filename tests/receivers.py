@@ -224,9 +224,60 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
         print("receiver case=destination-diff observe_payload=1 ci_payload=0 exit=21")
 
         if node_root:
+            dns_attempt_test(cli, project, evidence, Path(node_root).resolve())
             npm_destination_diff(cli, project, evidence, Path(node_root).resolve())
             lockfile_destination_diff(cli, project, evidence, Path(node_root).resolve())
             cargo_destination_diff(cli, project, evidence)
+
+
+def dns_attempt_test(cli, project, evidence, runtime):
+    demo = project / "dns-attempts"
+    demo.mkdir()
+    (demo / "package.json").write_text(json.dumps({
+        "name": "veil-dns-fixture", "version": "1.2.3", "private": True,
+        "scripts": {"postinstall": "node probe.cjs"},
+    }))
+    (demo / "probe.cjs").write_text(
+        'fetch("https://postinstall.invalid").then(() => process.exit(2), '
+        'error => { if (error.cause?.code !== "ENOTFOUND") process.exit(3) });'
+    )
+    if sys.platform == "linux":
+        shutil.copytree(runtime, demo / "runtime", symlinks=True)
+        runtime = demo / "runtime"
+    env = dict(os.environ, PATH=f"{runtime / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+    baseline = evidence / "dns-baseline.json"
+    report = evidence / "dns-report.json"
+    child = subprocess.run(
+        [cli, "observe", "--backend", "isolated", "--baseline-out", baseline, "--", "/usr/bin/true"],
+        cwd=demo, env=env, capture_output=True, text=True, timeout=10,
+    )
+    assert child.returncode == 0, child.stderr
+    child = subprocess.run(
+        [cli, "ci", "--baseline", baseline, "--report", report, "--", "npm", "--no-update-notifier", "run", "postinstall"],
+        cwd=demo, env=env, capture_output=True, text=True, timeout=20,
+    )
+    data = json.loads(report.read_text())
+    assert child.returncode == 21 and data["child_status"]["exit_code"] == 0, child.stderr
+    assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
+    assert data["coverage"]["dns_attempts"] == "node_dns_lookup_hook" and not data["destinations"], data
+    attempt, = data["comparison"]["attempted_added"]
+    assert data["attempted"] == [attempt] and attempt["host"] == "postinstall.invalid"
+    assert attempt["attribution"] == [{"confidence": "inferred", "package": {
+        "name": "veil-dns-fixture", "version": "1.2.3", "script": "postinstall", "path": ".",
+    }}], child.stderr
+    print(next(line for line in child.stderr.splitlines() if "attempted (blocked)" in line))
+    print(f"receiver case=node-dns os={sys.platform} connect=0 child=0 exit=21")
+
+    flood = evidence / "dns-overflow.json"
+    child = subprocess.run(
+        [cli, "observe", "--backend", "isolated", "--report", flood, "--", "node", "-e",
+         'const dns = require("node:dns").promises; (async () => { for (let i = 0; i < 1025; i++)'
+         ' await dns.lookup("overflow" + i + ".invalid").catch(() => {}); })()'],
+        cwd=demo, env=env, capture_output=True, text=True, timeout=30,
+    )
+    data = json.loads(flood.read_text())
+    assert child.returncode == 125 and data["coverage"]["dns_attempts"] == "incomplete", child.stderr
+    assert len(data["attempted"]) == 1024 and not data["destinations"]
 
 
 def npm_destination_diff(cli, project, evidence, runtime):

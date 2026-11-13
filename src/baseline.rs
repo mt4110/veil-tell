@@ -1,5 +1,5 @@
 use crate::cli::Backend;
-use crate::report::{Destination, OutputFile};
+use crate::report::{Attempted, Destination, OutputFile};
 use crate::{Result, error};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -60,6 +60,8 @@ struct Baseline {
     )]
     lockfile: Option<crate::lockfile::Summary>,
     destinations: Vec<Endpoint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    attempted: Vec<Attempted>,
 }
 
 impl Baseline {
@@ -85,6 +87,7 @@ impl Baseline {
             backend,
             lockfile: None,
             destinations: counts.into_values().collect(),
+            attempted: Vec::new(),
         }
     }
 
@@ -110,6 +113,22 @@ impl Baseline {
                 "invalid baseline destinations; use sorted unique canonical hosts on port 443 with positive counts",
             ));
         }
+        if self.attempted.len() > 1024
+            || self
+                .attempted
+                .windows(2)
+                .any(|pair| pair[0].host >= pair[1].host)
+            || self.attempted.iter().any(|entry| {
+                entry.attempts == 0
+                    || entry.attribution.len() > 5
+                    || entry.attribution.iter().any(|source| !source.valid())
+                    || crate::policy::normalize_host(&entry.host).as_deref() != Some(&entry.host)
+            })
+        {
+            return Err(error(
+                "invalid baseline DNS attempts; use sorted unique canonical hosts",
+            ));
+        }
         Ok(())
     }
 
@@ -125,6 +144,17 @@ impl Baseline {
             .map(|e| ((e.host.as_str(), e.port), e.attempts))
             .collect();
         let mut diff = Comparison::new("compared");
+        diff.attempted_added.extend(
+            current
+                .attempted
+                .iter()
+                .filter(|entry| {
+                    self.attempted
+                        .binary_search_by(|old| old.host.cmp(&entry.host))
+                        .is_err()
+                })
+                .cloned(),
+        );
         diff.backend_changed = self.backend != current.backend;
         for e in &current.destinations {
             match index.get(&(e.host.as_str(), e.port)) {
@@ -205,6 +235,8 @@ pub struct Comparison {
     backend_changed: bool,
     added: Vec<Endpoint>,
     removed: Vec<Endpoint>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    attempted_added: Vec<Attempted>,
     count_changes: Vec<CountChange>,
 }
 
@@ -217,6 +249,7 @@ impl Comparison {
             backend_changed: false,
             added: vec![],
             removed: vec![],
+            attempted_added: vec![],
             count_changes: vec![],
         }
     }
@@ -235,7 +268,7 @@ impl Comparison {
     }
 
     pub fn has_new(&self) -> bool {
-        !self.added.is_empty()
+        !self.added.is_empty() || !self.attempted_added.is_empty()
     }
 
     pub fn display(&self, automatic: bool) {
@@ -283,6 +316,9 @@ impl Comparison {
                     );
                 }
             }
+        }
+        for e in &self.attempted_added {
+            eprintln!("  + attempted (blocked) / 名前解決の試み: {}", e.host);
         }
         for e in &self.removed {
             eprintln!(
@@ -525,12 +561,29 @@ impl Session {
             .collect())
     }
 
+    pub fn has_new_attempt(&self, attempted: &[Attempted]) -> bool {
+        self.before.as_ref().is_some_and(|before| {
+            attempted.iter().any(|entry| {
+                before
+                    .attempted
+                    .binary_search_by(|old| old.host.cmp(&entry.host))
+                    .is_err()
+            })
+        })
+    }
+
     pub fn output(&self) -> Option<&Path> {
         self.output.as_ref().map(OutputFile::path)
     }
 
-    pub fn finish(self, backend: Backend, events: &[Destination]) -> Result<Comparison> {
+    pub fn finish(
+        self,
+        backend: Backend,
+        events: &[Destination],
+        attempted: &[Attempted],
+    ) -> Result<Comparison> {
         let mut current = Baseline::capture(backend, events);
+        current.attempted = attempted.to_vec();
         current.lockfile = if self.ci || self.before.is_some() || self.initial_lock.is_some() {
             self.initial_lock
         } else {
@@ -558,6 +611,14 @@ impl Session {
                 if diff.has_new() {
                     let mut current = current;
                     current.destinations.extend(diff.removed.iter().cloned());
+                    let attempts: BTreeMap<_, _> = before
+                        .attempted
+                        .iter()
+                        .chain(&current.attempted)
+                        .map(|e| (e.host.clone(), e.clone()))
+                        .collect();
+                    current.attempted = attempts.into_values().collect();
+                    current.validate()?;
                     current
                         .destinations
                         .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
