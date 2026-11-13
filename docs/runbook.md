@@ -353,3 +353,82 @@ jq '{
 `--timeout-seconds` は各試行のコマンド起動後に適用され、既定は300秒です。不正な引数やポリシーなどで比較を開始できない場合は `125` を返します。ポリシーとレポートは `--source` の外に置き、レポートには一時ディレクトリのルートを含まない専用のディレクトリを使います。Linux で内部中継の失敗やシグナルと区別できない子の終了コード `125`・`128` 以上は、`child_exit_ambiguous` で判定不能になります。
 
 判定の対象は、指定したコマンド、開始時のキャッシュ、プロキシが観測した HTTP CONNECT です。信頼できるコマンドをプロジェクト相対パスで指定してください。外部サービスやスナップショット外のキャッシュは試行間で変わり得ます。
+
+## 6. image-drop-input で verify を再現する
+
+公開版 veil-tell `v0.2.0` の macOS arm64 バイナリを SHA-256 で照合し、macOS 27.2 arm64 で sudo なしで実行しました。image-drop-input はコミット `1cc4f42b59992bf63cc646ac88bcb0834b6215cc`、Node.js は 26.13.0、npm は 12.2.2 です。 [veil-tell v0.2.0 の配布ページ](https://github.com/mt4110/veil-tell/releases/tag/v0.2.0)
+
+### 比較条件と実行コマンド
+
+第5節の「同じソースとキャッシュを用意する」の手順を使い、`veil` を展開した公開バイナリの絶対パスに、`commit` を上記のコミットに設定します。`git clone` の URL は image-drop-input のリポジトリに差し替えます。照合に使った `package-lock.json` の SHA-256 は `5eddc44e5259611589640c5e77e54e1f5a4ac1d9d619dc1d2a8224a40c19137c` です。 [image-drop-input リポジトリ](https://github.com/mt4110/image-drop-input)
+
+第5節の `check.sh` を、準備用コピーを作る前に以下に差し替えます。各試行は `node_modules` がない状態で始まり、ロックファイルの SHA-256 を実行の前後に照合します。`workflow` のコマンドは image-drop-input の CI と同じ順序です。 [比較した CI 手順](https://github.com/mt4110/image-drop-input/blob/1cc4f42b59992bf63cc646ac88bcb0834b6215cc/.github/workflows/ci.yml#L32-L36)
+
+```bash
+cat > "$demo/cold/check.sh" <<'SH'
+set -eu
+export npm_config_cache=./.comparison-cache
+export npm_config_userconfig=./.comparison-user.npmrc
+export npm_config_globalconfig=./.comparison-global.npmrc
+export npm_config_fetch_retries=0
+export npm_config_fetch_timeout=10000
+export npm_config_update_notifier=false
+export npm_config_fund=false
+export npm_config_audit=true
+export CI=true
+
+lock_sha=5eddc44e5259611589640c5e77e54e1f5a4ac1d9d619dc1d2a8224a40c19137c
+check_lock() {
+  test "$(shasum -a 256 package-lock.json | cut -d ' ' -f1)" = "$lock_sha"
+}
+step() {
+  printf '\n>>> npm %s\n' "$*"
+  npm "$@"
+}
+
+test ! -e node_modules
+check_lock
+status=0
+case "$1" in
+  seed) step ci ;;
+  workflow)
+    step ci
+    step run typecheck
+    step test
+    step run build:examples
+    step run check:package
+    ;;
+  audit) step audit || status=$? ;;
+  *) exit 64 ;;
+esac
+check_lock
+exit "$status"
+SH
+```
+
+第5節の手順どおり、`registry.npmjs.org:443` だけを許可し、準備用の `npm ci` で得た `_cacache` だけを `warm` に移します。同じ `trial` 関数を定義し、その末尾にある Prompt Recipe 用の呼び出しを次の2行に差し替えます。
+
+```bash
+trial workflow warm 120 workflow
+trial audit warm 120 audit
+```
+
+### 終了コードと JSON の見方
+
+| 工程 | トップレベルの判定と終了コード | 各試行で確認したこと |
+| --- | --- | --- |
+| インストール、型チェック、テスト、サンプルビルド、パッケージ検査 | `passes`、`0` | `allowed` と `denied` の `child_status.exit_code` はともに `0`。ログでは両試行で216件のテストに成功。再許可試行の `restored` は `null` |
+| 単独の `npm audit` | `fails`、`1` | `allowed`、`denied`、`restored` の子の終了コードは `0 → 1 → 0`。拒否時のログに `403`、`run_status.reason` に `child_failed` |
+
+```bash
+jq '{
+  verdict, exit_code,
+  child_exits: ([.trials.allowed, .trials.denied, .trials.restored]
+    | map(.child_status.exit_code)),
+  denied_run_reason: .trials.denied.run_status.reason,
+  denied: [.trials.denied.destinations[] |
+    {host, port, reason, result, sent_bytes, received_bytes}]
+}' "$demo/state/workflow.json" "$demo/state/audit.json"
+```
+
+トップレベルの `exit_code` を同名の `.exit` ファイルと照合します。両レポートの拒否試行では、`registry.npmjs.org:443` に対する `explicit_deny` と `blocked` を記録し、送受信はともに0バイトでした。この結果で閉じられたのは、依存キャッシュが揃ったビルド・テスト工程の許可です。監査結果はレジストリ側の脆弱性情報によって変わり得ます。

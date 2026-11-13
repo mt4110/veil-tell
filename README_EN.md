@@ -16,6 +16,8 @@ On macOS, we ran Prompt Recipe from the same source and lockfile, changing only 
 
 [Reproduce the Prompt Recipe demo and read the JSON (Japanese)](docs/runbook.md#5-prompt-recipe-で-verify-を再現する)
 
+On **image-drop-input**, we used the published `v0.2.0` binary on macOS with the same source, lockfile, and populated dependency cache in each trial. The build and all 216 tests **passed with `registry.npmjs.org:443` blocked**. A separate `npm audit` **failed with the destination blocked**. Its exit codes were `0 → 1 → 0` with the destination allowed, blocked, and allowed again. [Trial conditions and JSON guide (Japanese)](docs/runbook.md#6-image-drop-input-で-verify-を再現する)
+
 ## Build and run
 
 Run `cargo install --locked --path .` from the repository. The example below allows only the public npm registry to install `is-number@7.0.0`.

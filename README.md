@@ -16,6 +16,8 @@ macOS で Prompt Recipe の同じソースとロックファイルを使い、`r
 
 [Prompt Recipe での再現手順と JSON の見方](docs/runbook.md#5-prompt-recipe-で-verify-を再現する)
 
+**image-drop-input** でも、公開版 `v0.2.0` を macOS で使い、同じソース・ロックファイル・依存キャッシュから `registry.npmjs.org:443` の許可だけを切り替えました。ビルドとテストは**閉じても通り**、許可・拒否ともに216件成功しました。別に実行した `npm audit` は**閉じると失敗**し、許可・拒否・再許可で終了コードは `0 → 1 → 0` でした。 [比較条件と JSON の見方](docs/runbook.md#6-image-drop-input-で-verify-を再現する)
+
 ## ビルドと実行
 
 リポジトリで `cargo install --locked --path .` を実行します。以下は、公開 npm レジストリだけを許可して `is-number@7.0.0` を取得する例です。
