@@ -1,0 +1,110 @@
+name: Build release artifacts
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions: {}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      matrix:
+        include:
+          - runner: macos-26
+            platform: macos-arm64
+            target: aarch64-apple-darwin
+          - runner: ubuntu-26.04
+            platform: linux-x86_64-gnu
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build with the repository toolchain
+        env:
+          BUILD_TARGET: ${{ matrix.target }}
+        run: |
+          rustc --version
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$BUILD_TARGET"
+          cargo build --release --locked --bin veil-tell
+
+      - name: Package and checksum
+        id: package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          version=$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -er '.packages[] | select(.name == "veil-tell") | .version')
+          if [[ "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "v$version" ]]; then
+            printf 'Tag %s does not match Cargo version v%s\n' "$GITHUB_REF_NAME" "$version" >&2
+            exit 1
+          fi
+          name="veil-tell-$version-$PLATFORM"
+          mkdir -p "dist/$name"
+          install -m 755 target/release/veil-tell "dist/$name/veil-tell"
+          install -m 644 LICENSE "dist/$name/LICENSE"
+          (
+            cd dist
+            COPYFILE_DISABLE=1 tar --no-xattrs -czf "$name.tar.gz" "$name"
+            shasum -a 256 "$name.tar.gz" > "$name.sha256"
+            shasum -a 256 -c "$name.sha256"
+          )
+          printf 'name=%s\n' "$name" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the archive and executable
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            dist/${{ steps.package.outputs.name }}.tar.gz
+            dist/${{ steps.package.outputs.name }}/veil-tell
+
+      - name: Upload platform files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-build-${{ matrix.platform }}
+          path: |
+            dist/${{ steps.package.outputs.name }}.tar.gz
+            dist/${{ steps.package.outputs.name }}.sha256
+          if-no-files-found: error
+
+  collect:
+    name: Assemble distribution files
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-build-*
+          path: dist
+          merge-multiple: true
+
+      - name: Assemble and verify SHA256SUMS
+        working-directory: dist
+        run: |
+          cat veil-tell-*-macos-arm64.sha256 veil-tell-*-linux-x86_64-gnu.sha256 > SHA256SUMS
+          sha256sum --strict -c SHA256SUMS
+
+      - name: Upload distribution files
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: veil-tell-distribution
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error

@@ -1,1 +1,126 @@
 # veil-tell
+
+[English](README_EN.md)
+
+対応する macOS と Linux で **sudo なし**で使える、**コマンド単位**の通信先チェックです。ローカルプロキシに届いた HTTP CONNECT を記録し、制限モードでは未登録の CONNECT を拒否して **CI を失敗**させられます。veil-tell 自体はテレメトリーを送りません。
+
+## 実測デモ
+
+macOS 27.2 arm64 で、空のキャッシュから `npm install` で `is-number@7.0.0` をインストールしました。公開 npm レジストリからメタデータと tarball を取得し、veil-tell は許可済みの `registry.npmjs.org:443` への HTTP CONNECT を1件記録しました。npm と veil-tell の終了コードはともに `0` でした。
+
+```text
+npm http fetch GET 200 https://registry.npmjs.org/is-number 60ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz 23ms (cache miss)
+veil-tell: registry.npmjs.org:443 allow allow_rule ×1
+```
+
+## ビルドと実行
+
+リポジトリで `cargo install --locked --path .` を実行します。デモを再現するには、新しい作業ディレクトリと、その外側にポリシー・レポートの置き場所を用意します。
+
+デモの前に `veil-tell`、Node.js、npm が PATH にあることを確認します。Ubuntu では先に公式の `bubblewrap` を導入します。Nix の開発シェルで Ubuntu 公式の `/usr/bin/bwrap` を使う場合は `unset VEIL_TELL_BWRAP` を実行してください。 [Ubuntu の導入手順](#ubuntu-で隔離と終了コード-20-を試す)
+
+```sh
+demo_dir=$(mktemp -d /tmp/veil-tell-demo.XXXXXX)
+mkdir "$demo_dir/project" "$demo_dir/state"
+cd "$demo_dir/project"
+cat > package.json <<'JSON'
+{"name":"veil-tell-demo","version":"1.0.0","private":true,"dependencies":{"is-number":"7.0.0"}}
+JSON
+touch user.npmrc global.npmrc
+cat > "$demo_dir/state/npm.toml" <<'TOML'
+version = 1
+profile = "npm"
+
+[[rule]]
+action = "allow"
+host = "registry.npmjs.org"
+port = 443
+TOML
+
+veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
+  --fail-on-unknown --report "$demo_dir/state/npm-run.json" -- \
+  npm install --registry=https://registry.npmjs.org/ --cache=./npm-cache \
+  --userconfig=./user.npmrc --globalconfig=./global.npmrc \
+  --strict-ssl --no-audit --no-fund --no-update-notifier --loglevel=http
+```
+
+宛先を調べるには `veil-tell COMMAND` を使います。直接通信を OS 側で制限しながら宛先を調べる場合は `veil-tell observe --backend isolated -- COMMAND` を使います。制限モードの TOML は DNS ホスト名とポート `443` の完全一致で判定します。明示的な拒否は `action = "deny"` で指定できます。
+
+`--fail-on-unknown` は未登録の CONNECT を拒否し、子がエラーを握り潰して終了コード `0` を返しても、veil-tell は `20` を返します。明示拒否はトンネルを遮断し、このフラグによる終了コードの変更は発生しません。セットアップや記録のエラーでは `125` を返します。
+
+`veil-tell observe --emit-policy FILE -- COMMAND` は、記録した CONNECT のホスト名とポートを重複なく並べ、全候補をコメント付きの保留として保存します。生成直後の TOML は有効なルールがゼロなので、そのまま `restrict --fail-on-unknown` に渡すと候補も未登録として拒否されます。レビュー済みの候補だけコメントを外してください。観測が中断・不完全だった場合やコマンドが失敗した場合は出力しません。既存ファイルは上書きせず、隔離時は作業ディレクトリの外に出力します。
+
+## 観測範囲と既知の弱点
+
+- **観測対象はローカルプロキシに届いた HTTP CONNECT です。** `veil-tell COMMAND` では、プロキシ設定に従うクライアントの CONNECT を記録します。直接通信は通り得ます。直接通信の試行先は観測範囲外で、記録が0件でも直接通信の有無は分かりません。
+- **隔離モードは OS 側で直接通信を制限します。** JSON v1 の `coverage.proxy = "http_connect_requests"` と `coverage.direct_attempt_destinations = "not_observed"` は両モードに共通です。OS が拒否した直接通信や IPC の詳細は JSON に記録されません。
+- **許可したホスト経由の持ち出しは残ります。** たとえば、子プロセスが使える認証情報や公開アップロード機能を通じて、許可済みの GitHub や npm レジストリへ秘密情報を送れる場合があります。プロキシは TLS を終端せず、HTTP メソッド、URL パス、本文は観測・制御の範囲外です。ホストの許可は、そのホストへのトンネルを許可します。
+
+LuLu・Little Snitch・OpenSnitch のホスト側制御、Firejail のプロセス隔離、mitmproxy の通信調査と用途が重なります。veil-tell では、起動したコマンドを単位として観測し、レビューしたポリシーをローカルと CI で使えます。 [先行例との比較](docs/design.md#8-先行例との関係)
+
+## 隔離の動作条件
+
+- **Linux** は非 setuid の bubblewrap と非特権 user namespace が必要です。既定のパスは `/usr/bin/bwrap` で、`VEIL_TELL_BWRAP` に信頼できる絶対パスを指定できます。作業ディレクトリは書き込み可能で、標準のランタイムディレクトリと Nix store は読み取り専用です。
+- **macOS** は非推奨の `/usr/bin/sandbox-exec` を使います。外向きの IPv4/TCP は実行専用の localhost プロキシポートに限定し、名前付き Mach サービスの検索と登録を拒否します。macOS 27.2 arm64 の受信試験では `CFMessagePort` とアプリ同梱 XPC サービスの TCP 中継を確認しました。同じ環境で、`getaddrinfo()` の A・AAAA と `DNSServiceQueryRecord()` の TXT・KEY などをユニキャスト DNS で試し、隔離時は権威 DNS に届きませんでした。
+- 隔離時は一時的なホーム、絞った環境変数、閉じた標準入力を使います。ポリシーとレポートは作業ディレクトリの外に置きます。レポートは実行ごとに未使用のパスを指定してください。
+
+## Ubuntu で隔離と終了コード `20` を試す
+
+Ubuntu 公式リポジトリから bubblewrap を導入します。導入には管理者権限が必要です。以降の `veil-tell` は一般ユーザーで実行します。Ubuntu 26.04.1 LTS x86_64 では、既存の AppArmor プロファイルが `/usr/bin/bwrap` に適用され、AppArmor と sysctl の設定を変更せずに動作しました。 [Ubuntu の AppArmor ドキュメント](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/)
+
+```sh
+sudo apt install bubblewrap
+```
+
+`veil-tell` を上の手順でビルド・インストールし、`/usr/bin/curl` が使える状態で次を実行します。公開 npm レジストリからメタデータを取得して TOML を生成し、その TOML を編集せずに同じ宛先への接続を試します。
+
+```sh
+(
+  set -eu
+  unset VEIL_TELL_BWRAP
+  demo_dir=$(mktemp -d /tmp/veil-tell-ubuntu.XXXXXX)
+  mkdir "$demo_dir/work" "$demo_dir/state"
+  cd "$demo_dir/work"
+  url=https://registry.npmjs.org/is-number
+
+  veil-tell observe --backend isolated --emit-policy "$demo_dir/state/observed.toml" \
+    --report "$demo_dir/state/observe.json" -- \
+    /usr/bin/curl -q --noproxy '' --fail --silent --show-error \
+      --max-time 20 --output /dev/null --write-out 'HTTP %{http_code}\n' "$url"
+  cat "$demo_dir/state/observed.toml"
+
+  status=0
+  veil-tell restrict --backend isolated --policy "$demo_dir/state/observed.toml" \
+    --fail-on-unknown --report "$demo_dir/state/restrict.json" -- \
+    /usr/bin/curl -q --noproxy '' --fail --silent --show-error \
+      --max-time 20 --output /dev/null "$url" || status=$?
+  printf 'veil-tell exit: %s\n' "$status"
+  cat "$demo_dir/state/restrict.json"
+  test "$status" -eq 20
+)
+```
+
+観測時は `HTTP 200` が表示され、TOML には `registry.npmjs.org:443` がコメント付きの候補として出ます。制限時はプロキシが CONNECT に `403` を返し、`veil-tell exit: 20` が表示されます。`restrict.json` の `isolation` は `applied`、宛先の `reason` は `unknown_destination`、`run_status.exit_code` は `20` です。
+
+`bwrap` が起動時に `Operation not permitted` を返す場合は、`/usr/bin/bwrap` が Ubuntu 公式パッケージのもので、そのパスに既存の AppArmor プロファイルが適用されているかを確認してください。隔離の可否はホストの設定に依存します。
+
+## 開発と受信側での検証
+
+`nix develop path:.` で開発ツールを用意できます。Rust は `rust-toolchain.toml`、試験用の Node.js と開発タスクは mise で管理します。
+
+```sh
+cargo test --locked
+cargo build --locked --examples --bins
+python3 -B tests/receivers.py target/debug/veil-tell target/debug/examples/receiver_cli
+```
+
+Ubuntu で受信試験を実行するときは、ホストの IPv4 を `VEIL_TELL_TEST_IP` に指定します。 [受信試験の手順](docs/runbook.md#3-ローカル受信側の回帰試験)
+
+最後に Node.js と npm の配布ディレクトリを渡すと、空のキャッシュを使うローカル HTTPS レジストリ試験も実行します。試験用の実行ファイルだけが `allowed.test` を試験受信口へ接続します。通常ビルドはシステムリゾルバを使い、接続先が公開アドレスかを検査します。
+
+macOS の Mach/XPC 試験は、Xcode コマンドラインツールを用意し、`python3 -B tests/macos-ipc.py target/debug/veil-tell` で実行できます。受信ログと JSON が残ります。
+
+[MIT ライセンス](LICENSE) · [脆弱性の報告](SECURITY.md) · [macOS・Ubuntu の再現手順](docs/runbook.md)
+
+[設計書](docs/design.md) · [Linux の実験](experiments/linux-egress/README.md) · [macOS の実験](experiments/macos-egress/README.md)

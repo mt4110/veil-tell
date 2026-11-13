@@ -1,0 +1,126 @@
+# veil-tell
+
+[日本語](README.md)
+
+Check network destinations **one command at a time**, **without sudo** on supported macOS and Linux systems. veil-tell records HTTP CONNECT requests that reach its local proxy. In restrict mode it can deny unlisted CONNECT requests and **fail a CI job**. veil-tell sends no telemetry of its own.
+
+## Measured demo
+
+On macOS 27.2 arm64, `npm install` installed `is-number@7.0.0` from an empty cache. npm fetched the metadata and tarball from the public npm registry. veil-tell recorded one allowed HTTP CONNECT request to `registry.npmjs.org:443`. Both npm and veil-tell exited with code `0`.
+
+```text
+npm http fetch GET 200 https://registry.npmjs.org/is-number 60ms (cache miss)
+npm http fetch GET 200 https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz 23ms (cache miss)
+veil-tell: registry.npmjs.org:443 allow allow_rule ×1
+```
+
+## Build and run
+
+Run `cargo install --locked --path .` from the repository. To reproduce the demo, create a fresh working directory and keep the policy and report outside it.
+
+Before running the demo, make sure `veil-tell`, Node.js, and npm are on PATH. On Ubuntu, install the official `bubblewrap` package first. To use Ubuntu's `/usr/bin/bwrap` from the Nix development shell, run `unset VEIL_TELL_BWRAP`. [Ubuntu setup](#try-isolation-and-exit-code-20-on-ubuntu)
+
+```sh
+demo_dir=$(mktemp -d /tmp/veil-tell-demo.XXXXXX)
+mkdir "$demo_dir/project" "$demo_dir/state"
+cd "$demo_dir/project"
+cat > package.json <<'JSON'
+{"name":"veil-tell-demo","version":"1.0.0","private":true,"dependencies":{"is-number":"7.0.0"}}
+JSON
+touch user.npmrc global.npmrc
+cat > "$demo_dir/state/npm.toml" <<'TOML'
+version = 1
+profile = "npm"
+
+[[rule]]
+action = "allow"
+host = "registry.npmjs.org"
+port = 443
+TOML
+
+veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
+  --fail-on-unknown --report "$demo_dir/state/npm-run.json" -- \
+  npm install --registry=https://registry.npmjs.org/ --cache=./npm-cache \
+  --userconfig=./user.npmrc --globalconfig=./global.npmrc \
+  --strict-ssl --no-audit --no-fund --no-update-notifier --loglevel=http
+```
+
+Use `veil-tell COMMAND` to inspect destinations. Use `veil-tell observe --backend isolated -- COMMAND` to inspect destinations while restricting direct connections at the OS level. In restrict mode, TOML rules match exact DNS hostnames on port `443`. Use `action = "deny"` to explicitly deny a destination.
+
+With `--fail-on-unknown`, veil-tell denies unlisted CONNECT requests and exits with code `20` even if the child handles the error and exits with code `0`. An explicit deny blocks the tunnel without triggering exit code 20. Setup and capture errors use exit code `125`.
+
+Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. Each recorded CONNECT host and port appears once as a commented candidate pending review. The draft contains zero active rules. If passed directly to `restrict --fail-on-unknown`, its candidates are denied as unlisted. Uncomment only the candidates you have reviewed. The draft is written after a successful command with uninterrupted and complete capture. Existing files are protected from overwrite. With isolation, place the output outside the working directory.
+
+## Capture scope and known limitations
+
+- **Capture covers HTTP CONNECT requests that reach the local proxy.** `veil-tell COMMAND` records CONNECT requests from clients that honor the proxy settings. Direct connections can still succeed. Direct connection attempts are outside the capture scope. Zero recorded requests leaves direct network activity unknown.
+- **The isolated backend restricts direct connections at the OS level.** Both modes report `coverage.proxy = "http_connect_requests"` and `coverage.direct_attempt_destinations = "not_observed"` in JSON v1. The report omits details of OS-denied direct connections and IPC.
+- **Data can still leave through an allowed host.** For example, a child process may be able to send secrets to an allowed GitHub host or npm registry using credentials it can access or public upload features. The proxy tunnels TLS. HTTP methods, URL paths, and request bodies are outside its capture and control scope. An allow rule permits a tunnel to the host.
+
+veil-tell overlaps with host-level controls in LuLu, Little Snitch, and OpenSnitch, process isolation in Firejail, and traffic inspection in mitmproxy. Its unit of observation is the command it launches, and a reviewed policy can be used locally and in CI. [Comparison with related tools](docs/design.md#8-先行例との関係)
+
+## Isolation requirements
+
+- **Linux** requires non-setuid bubblewrap and unprivileged user namespaces. The default path is `/usr/bin/bwrap`. Set `VEIL_TELL_BWRAP` to a trusted absolute path to use a different installation. The working directory is writable. Standard runtime directories and the Nix store are read-only.
+- **macOS** uses the deprecated `/usr/bin/sandbox-exec`. It limits outbound IPv4/TCP to the run's localhost proxy port and denies named Mach service lookup and registration. Receiver tests on macOS 27.2 arm64 covered `CFMessagePort` and an app-bundled XPC service relaying to TCP. On the same OS, tested unicast DNS queries including A and AAAA via `getaddrinfo()` and TXT and KEY via `DNSServiceQueryRecord()` did not reach the authoritative server under isolation.
+- Isolated runs use a temporary home, a reduced environment, and closed standard input. Keep policy and report files outside the working directory. Choose a new report path for each run.
+
+## Try isolation and exit code `20` on Ubuntu
+
+Install bubblewrap from Ubuntu’s official repository. Installation requires administrator privileges. Run the subsequent `veil-tell` commands as a regular user. On Ubuntu 26.04.1 LTS x86_64, the existing AppArmor profile applied to `/usr/bin/bwrap`, and the workflow ran with the existing AppArmor and sysctl settings. [Ubuntu AppArmor documentation](https://documentation.ubuntu.com/security/security-features/privilege-restriction/apparmor/)
+
+```sh
+sudo apt install bubblewrap
+```
+
+Build and install `veil-tell` as shown above and make sure `/usr/bin/curl` is available. The example fetches metadata from the public npm registry, generates a TOML draft, and uses it as-is to try connecting to the same destination.
+
+```sh
+(
+  set -eu
+  unset VEIL_TELL_BWRAP
+  demo_dir=$(mktemp -d /tmp/veil-tell-ubuntu.XXXXXX)
+  mkdir "$demo_dir/work" "$demo_dir/state"
+  cd "$demo_dir/work"
+  url=https://registry.npmjs.org/is-number
+
+  veil-tell observe --backend isolated --emit-policy "$demo_dir/state/observed.toml" \
+    --report "$demo_dir/state/observe.json" -- \
+    /usr/bin/curl -q --noproxy '' --fail --silent --show-error \
+      --max-time 20 --output /dev/null --write-out 'HTTP %{http_code}\n' "$url"
+  cat "$demo_dir/state/observed.toml"
+
+  status=0
+  veil-tell restrict --backend isolated --policy "$demo_dir/state/observed.toml" \
+    --fail-on-unknown --report "$demo_dir/state/restrict.json" -- \
+    /usr/bin/curl -q --noproxy '' --fail --silent --show-error \
+      --max-time 20 --output /dev/null "$url" || status=$?
+  printf 'veil-tell exit: %s\n' "$status"
+  cat "$demo_dir/state/restrict.json"
+  test "$status" -eq 20
+)
+```
+
+The observation run prints `HTTP 200`, and the TOML lists `registry.npmjs.org:443` as a commented candidate. During the restriction run, the proxy returns `403` to CONNECT and the example prints `veil-tell exit: 20`. In `restrict.json`, `isolation` is `applied`, the destination’s `reason` is `unknown_destination`, and `run_status.exit_code` is `20`.
+
+If `bwrap` fails to start with `Operation not permitted`, check that `/usr/bin/bwrap` comes from Ubuntu’s package and that the existing AppArmor profile applies to that path. Isolation depends on the host configuration.
+
+## Development and receiver tests
+
+`nix develop path:.` supplies development tools. `rust-toolchain.toml` pins Rust, and mise manages Node.js for tests and development tasks.
+
+```sh
+cargo test --locked
+cargo build --locked --examples --bins
+python3 -B tests/receivers.py target/debug/veil-tell target/debug/examples/receiver_cli
+```
+
+On Ubuntu, set `VEIL_TELL_TEST_IP` to the host's non-loopback IPv4 address for the receiver tests. [Receiver test commands](docs/runbook.md#3-ローカル受信側の回帰試験)
+
+Pass the directory of a Node.js distribution with npm as the final argument to include a local HTTPS registry test with an empty cache. The test executable maps `allowed.test` to the controlled receiver. The ordinary build uses the system resolver and checks that the destination address is public.
+
+On macOS, install the Xcode command-line tools and run `python3 -B tests/macos-ipc.py target/debug/veil-tell` to test Mach and XPC. The harness keeps the receiver logs and JSON reports.
+
+[MIT license](LICENSE) · [Report a vulnerability](SECURITY.md#security-policy) · [macOS and Ubuntu runbook (Japanese)](docs/runbook.md)
+
+[Design](docs/design.md) · [Linux experiments](experiments/linux-egress/README.md) · [macOS experiments](experiments/macos-egress/README.md)
