@@ -1,0 +1,14 @@
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
+
+[tools]
+node = "24.12.0"
+
+[tasks.fmt]
+run = "cargo fmt --all -- --check"
+
+[tasks.lint]
+run = "cargo clippy --locked --all-targets -- -D warnings"
+
+[tasks.test]
+run = "cargo test --locked"
