@@ -18,6 +18,14 @@ pub struct Launch {
     pub npm_wrapper: Option<tempfile::TempDir>,
 }
 
+#[derive(Default)]
+pub struct AttributionConfig<'a> {
+    pub npm: bool,
+    pub cargo: bool,
+    pub node_manager: Option<&'a str>,
+    pub node_attribution: bool,
+}
+
 pub async fn prepare(
     backend: Backend,
     command: &[OsString],
@@ -25,8 +33,14 @@ pub async fn prepare(
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] outputs: &[&Path],
     protected_dirs: &[&Path],
     secret: &str,
-    (attribute_npm, attribute_cargo): (bool, bool),
+    attribution: AttributionConfig<'_>,
 ) -> Result<Launch> {
+    let AttributionConfig {
+        npm: attribute_npm,
+        cargo: attribute_cargo,
+        node_manager,
+        node_attribution,
+    } = attribution;
     #[cfg(target_os = "linux")]
     if backend == Backend::Isolated {
         return linux::prepare(
@@ -36,13 +50,17 @@ pub async fn prepare(
             attribute_npm,
             attribute_cargo,
             protected_dirs,
+            (node_manager, node_attribution),
         )
         .await;
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let wrapper = (attribute_npm || attribute_cargo || backend == Backend::Isolated)
+    let wrapper = (attribute_npm
+        || attribute_cargo
+        || node_manager.is_some()
+        || backend == Backend::Isolated)
         .then(tempfile::tempdir)
         .transpose()?;
     let shell = wrapper
@@ -63,12 +81,17 @@ pub async fn prepare(
             crate::cargo_attribution::RUSTC_MODE,
         )?;
     }
+    let node_hook = wrapper
+        .as_ref()
+        .filter(|_| node_attribution || backend == Backend::Isolated)
+        .map(|dir| dir.path().join("node-dns.cjs"));
+    if let Some(hook) = &node_hook {
+        std::fs::write(hook, NODE_DNS_HOOK)?;
+    }
     let (mut launch, temporary) = if backend == Backend::Isolated {
         #[cfg(target_os = "macos")]
         {
             let home = tempfile::tempdir()?;
-            let node_hook = wrapper.as_ref().unwrap().path().join("node-dns.cjs");
-            std::fs::write(&node_hook, NODE_DNS_HOOK)?;
             // Named Mach and XPC services can perform network I/O outside the sandbox.
             let mut profile = format!(
                 "(version 1)\n(allow default)\n(deny network*)\n\
@@ -92,7 +115,6 @@ pub async fn prepare(
             let mut launch = Command::new("/usr/bin/sandbox-exec");
             launch.args(["-p", &profile]).args(command);
             restricted_env(&mut launch, home.path());
-            configure_node_dns(&mut launch, &node_hook, port, secret)?;
             (launch, Some(home))
         }
         #[cfg(not(target_os = "macos"))]
@@ -104,6 +126,18 @@ pub async fn prepare(
     };
     launch.current_dir(cwd);
     set_proxy(&mut launch, port, secret);
+    if let Some(hook) = &node_hook {
+        configure_node_dns(
+            &mut launch,
+            hook,
+            port,
+            secret,
+            backend == Backend::Isolated,
+        )?;
+    }
+    if let Some(manager) = node_manager {
+        configure_manager(&mut launch, cwd, manager, port, secret, node_attribution);
+    }
     if let Some(shell) = &shell {
         crate::attribution::configure(&mut launch, shell, cwd);
     }
@@ -127,7 +161,7 @@ pub async fn probe(cwd: &Path) -> Result<()> {
         &[],
         &[],
         &crate::credential()?,
-        (false, false),
+        AttributionConfig::default(),
     )
     .await?;
     let output =
@@ -166,20 +200,55 @@ pub fn configure_node_dns(
     hook: &Path,
     port: u16,
     secret: &str,
+    dns: bool,
 ) -> Result<()> {
     let hook = hook
         .to_str()
         .ok_or_else(|| error("the DNS hook path must be UTF-8"))?;
-    command
-        .env(
-            "NODE_OPTIONS",
-            format!("--require {}", serde_json::to_string(hook)?),
-        )
-        .env(
+    let mut node_options = if dns {
+        OsString::new()
+    } else {
+        std::env::var_os("NODE_OPTIONS").unwrap_or_default()
+    };
+    node_options.push(format!(" --require {}", serde_json::to_string(hook)?));
+    command.env("NODE_OPTIONS", node_options);
+    if dns {
+        command.env(
             "VEIL_TELL_DNS_RELAY",
             format!("http://veil:{secret}@127.0.0.1:{port}"),
         );
+    } else {
+        command.env_remove("VEIL_TELL_DNS_RELAY");
+    }
     Ok(())
+}
+
+pub fn configure_manager(
+    command: &mut Command,
+    cwd: &Path,
+    manager: &str,
+    port: u16,
+    secret: &str,
+    attribute: bool,
+) {
+    if attribute {
+        command
+            .env("VEIL_TELL_NODE_ROOT", cwd)
+            .env("VEIL_TELL_NODE_MANAGER", manager);
+    } else {
+        command
+            .env_remove("VEIL_TELL_NODE_ROOT")
+            .env_remove("VEIL_TELL_NODE_MANAGER");
+    }
+    if manager == "pnpm" {
+        command.env("npm_config_update_notifier", "false");
+    }
+    if manager == "yarn" {
+        let proxy = format!("http://veil:{secret}@127.0.0.1:{port}");
+        command
+            .env("YARN_HTTP_PROXY", &proxy)
+            .env("YARN_HTTPS_PROXY", proxy);
+    }
 }
 
 pub const PROXY_VARS: [&str; 8] = [

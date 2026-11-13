@@ -230,7 +230,7 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
             cargo_destination_diff(cli, project, evidence)
 
 
-def volume_test(fixture, project, evidence):
+def volume_test(fixture, project, evidence, node_root):
     policy = evidence / "volume.toml"
     policy.write_text('version = 1\nprofile = "volume"\n[[rule]]\n'
                       'action = "allow"\nhost = "allowed.test"\nport = 443\nmax_sent_bytes = 8192\n')
@@ -241,12 +241,28 @@ def volume_test(fixture, project, evidence):
         receiver.settimeout(5)
         address = f"{receiver.getsockname()[0]}:{receiver.getsockname()[1]}"
         env = dict(os.environ, VEIL_TELL_FIXTURE_RECEIVER=address)
-        for name, arguments, sent, expected, code in [
+        cases = [
             ("train", ["observe", "--baseline-out", baseline], 4096, 4096, 0),
             ("observe", ["observe", "--baseline", baseline], 524288, 524288, 0),
             ("restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
             ("ci", ["ci", "--baseline", baseline], 524288, 131072, 22),
-        ]:
+        ]
+        if node_root:
+            demo = project / "volume-demo"
+            demo.mkdir()
+            runtime = Path(node_root).resolve()
+            if sys.platform == "linux":
+                shutil.copytree(runtime, demo / "runtime", symlinks=True)
+                runtime = demo / "runtime"
+            env["PATH"] = f"{runtime / 'bin'}:{env['PATH']}"
+            shutil.copyfile(SCRIPT, demo / "probe.py")
+            (demo / "package.json").write_text(json.dumps({
+                "name": "veil-volume-fixture", "version": "1.2.3", "private": True,
+                "scripts": {"postinstall": f"{sys.executable} -B probe.py volume 524288"},
+            }))
+            cases.append(("postinstall", ["ci", "--baseline", baseline], 524288, 131072, 22))
+
+        for name, arguments, sent, expected, code in cases:
             received = []
 
             def collect():
@@ -263,10 +279,13 @@ def volume_test(fixture, project, evidence):
             thread.start()
             report = evidence / f"volume-{name}.json"
             try:
+                command = (["npm", "--no-update-notifier", "run", "postinstall"] if name == "postinstall"
+                           else [sys.executable, "-B", "probe.py", "volume", str(sent)])
                 child = subprocess.run(
-                    [fixture, *arguments, *([] if name == "ci" else ["--backend", "isolated"]),
-                     "--report", report, "--", sys.executable, "-B", "probe.py", "volume", str(sent)],
-                    cwd=project, env=env, capture_output=True, text=True, timeout=12,
+                    [fixture, *arguments, *([] if arguments[0] == "ci" else ["--backend", "isolated"]),
+                     "--report", report, "--", *command],
+                    cwd=demo if name == "postinstall" else project,
+                    env=env, capture_output=True, text=True, timeout=12,
                 )
             finally:
                 thread.join()
@@ -277,6 +296,10 @@ def volume_test(fixture, project, evidence):
             if name != "train":
                 anomaly, = result["volume_anomalies"]
                 assert anomaly["blocked"] == (code == 22), result
+                if name == "postinstall":
+                    source, = anomaly["attribution"]
+                    assert source["package"]["name"] == "veil-volume-fixture"
+                    assert source["package"]["script"] == "postinstall"
                 print(next(line for line in child.stderr.splitlines() if "volume anomaly" in line))
             print(f"receiver case=volume-{name} os={sys.platform} bytes={expected} child=0 exit={code}")
 
@@ -441,6 +464,7 @@ def npm_destination_diff(cli, project, evidence, runtime):
     assert result.returncode == 21 and "attribution" not in json.loads(no_attribute.read_text())["destinations"][0]
     migration = project / "migration"
     migration.mkdir()
+    (migration / "package.json").write_text('{"name":"migration","version":"1.0.0","private":true}')
     if sys.platform == "linux":
         shutil.copytree(runtime, migration / "runtime", symlinks=True)
         runtime = migration / "runtime"
@@ -550,9 +574,16 @@ def baseline_upgrade_test(cli, project, runtime):
     result = subprocess.run([cli, "migrate-baseline", "npm", old], cwd=project, capture_output=True, text=True)
     assert result.returncode == 0 and json.loads((state / "npm.json").read_text()) == data
     assert old.exists()
+    preview = subprocess.run([cli, "clean"], cwd=project, capture_output=True, text=True)
+    assert preview.returncode == 0 and old.name in preview.stdout and old.exists()
+    cleaned = subprocess.run([cli, "clean", "--apply"], cwd=project, capture_output=True, text=True)
+    assert cleaned.returncode == 0 and not old.exists() and (state / "npm.json").exists()
+    assert "Baseline saved" not in subprocess.run(
+        [cli, "/usr/bin/true"], cwd=project, env=env, capture_output=True, text=True
+    ).stderr
     # Known hosts that go quiet never become pending. Exercise a known nonempty baseline.
     for _ in range(5):
-        result = subprocess.run([cli, "npm", "--version"], cwd=project, env=env, capture_output=True, text=True)
+        result = subprocess.run([cli, "npm", "install", "--offline", "--no-audit", "--no-fund", "--no-update-notifier"], cwd=project, env=env, capture_output=True, text=True)
         assert result.returncode == 0 and "今回は未観測: allowed.test:443" in result.stderr, result.stderr
         assert "veil-tell accept" not in result.stderr and not (state / "pending.json").exists()
     if sys.platform == "linux":
@@ -646,7 +677,7 @@ def run(cli, fixture, node_root=None):
             assert child.returncode == 0 and "EBADF" in child.stdout, (child.stdout, child.stderr)
             assert receive(receiver, 1) == [b""]
             print("receiver case=inherited-fd connections=1 payload_bytes=0 errno=EBADF")
-        volume_test(fixture, project, evidence)
+        volume_test(fixture, project, evidence, node_root)
         destination_diff_test(cli, fixture, project, evidence, node_root)
         if node_root:
             npm_test(fixture, Path(node_root).resolve(), project, evidence, policies["allow"], ip)
@@ -706,18 +737,39 @@ def npm_test(fixture, runtime, project, evidence, policy, ip):
         try:
             env = dict(os.environ, VEIL_TELL_FIXTURE_RECEIVER=f"{ip}:{server.server_port}",
                        PATH=f"{runtime / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+            command = [
+                "npm", "install", "--registry=https://allowed.test", "--cafile=registry.crt",
+                "--cache=.npm-cache", "--no-audit", "--no-fund", "--no-update-notifier",
+                "--fetch-retries=0",
+            ]
             result = subprocess.run([
                 fixture, "restrict", "--backend", "isolated", "--policy", policy, "--fail-on-unknown",
-                "--report", evidence / "npm.json", "--", "npm", "install", "--registry=https://allowed.test",
-                "--cafile=registry.crt", "--cache=.npm-cache", "--no-audit", "--no-fund",
-                "--no-update-notifier", "--fetch-retries=0",
+                "--report", evidence / "npm.json", "--", *command,
             ], cwd=project, env=env, capture_output=True, text=True, timeout=25)
+            training_command = ["--cache=.npm-training-cache" if arg.startswith("--cache=") else arg
+                                for arg in command]
+            training_command[1] = "ci"
+            training = subprocess.run(
+                [fixture, *training_command], cwd=project, env=env, capture_output=True, text=True, timeout=25,
+            )
+            assert training.returncode == 0, training.stderr
+            for i in range(5):
+                args = command.copy()
+                args[args.index("install")] = "ci" if i % 2 == 0 else "install"
+                repeat = subprocess.run(
+                    [fixture, "ci", "--json", "--", *args],
+                    cwd=project, env=env, capture_output=True, text=True, timeout=25,
+                )
+                assert repeat.returncode == 0, repeat.stderr
+                assert not json.loads(repeat.stdout).get("volume_anomalies"), repeat.stdout
+                assert not (project / ".veil-tell/pending.json").exists()
+            print(f"receiver case=npm-volume-repeats os={sys.platform} repeats=5 anomalies=0")
         finally:
             server.shutdown()
             thread.join()
     print(result.stdout, end="")
     print(result.stderr, end="")
-    assert result.returncode == 0 and requests == ["/veil-cli-fixture", path], (result.stderr, requests)
+    assert result.returncode == 0 and requests[:2] == ["/veil-cli-fixture", path], (result.stderr, requests)
     assert (project / "node_modules/veil-cli-fixture/installed.txt").read_text() == "received"
     print(f"receiver case=npm requests={requests} exit={result.returncode}")
 

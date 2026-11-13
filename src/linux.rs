@@ -21,6 +21,7 @@ pub async fn prepare(
     attribute_npm: bool,
     attribute_cargo: bool,
     protected_dirs: &[&Path],
+    (node_manager, node_attribution): (Option<&str>, bool),
 ) -> Result<Launch> {
     let bwrap = std::env::var_os("VEIL_TELL_BWRAP")
         .map(PathBuf::from)
@@ -108,6 +109,12 @@ pub async fn prepare(
             .arg(crate::cargo_attribution::LINUX_WRAPPER);
         launch.args(["--setenv", "VEIL_TELL_RELAY_CARGO", "1"]);
     }
+    if let Some(manager) = node_manager {
+        launch.args(["--setenv", "VEIL_TELL_NODE_MANAGER", manager]);
+        if node_attribution {
+            launch.args(["--setenv", "VEIL_TELL_NODE_ATTRIBUTION", "1"]);
+        }
+    }
     let hook = temporary.path().join("node-dns.cjs");
     std::fs::write(&hook, NODE_DNS_HOOK)?;
     launch.arg("--ro-bind").arg(hook).arg(DNS_HOOK);
@@ -151,7 +158,17 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
     restricted_env(&mut command, Path::new("/tmp/veil-tell-home"));
     let port = listener.local_addr()?.port();
     set_proxy(&mut command, port, secret);
-    super::configure_node_dns(&mut command, Path::new(DNS_HOOK), port, secret)?;
+    super::configure_node_dns(&mut command, Path::new(DNS_HOOK), port, secret, true)?;
+    if let Ok(manager) = std::env::var("VEIL_TELL_NODE_MANAGER") {
+        super::configure_manager(
+            &mut command,
+            &std::env::current_dir()?,
+            &manager,
+            port,
+            secret,
+            std::env::var_os("VEIL_TELL_NODE_ATTRIBUTION").is_some(),
+        );
+    }
     if std::env::var_os("VEIL_TELL_RELAY_NPM").is_some() {
         crate::attribution::configure(
             &mut command,

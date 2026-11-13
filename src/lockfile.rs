@@ -19,6 +19,9 @@ pub struct Summary {
 #[serde(rename_all = "snake_case")]
 pub enum Ecosystem {
     Npm,
+    Pnpm,
+    Yarn,
+    Bun,
     Cargo,
 }
 
@@ -57,6 +60,9 @@ impl Summary {
     pub fn read(root: &Path, ecosystem: Ecosystem) -> Option<Self> {
         let filename = match ecosystem {
             Ecosystem::Npm => "package-lock.json",
+            Ecosystem::Pnpm => "pnpm-lock.yaml",
+            Ecosystem::Yarn => "yarn.lock",
+            Ecosystem::Bun => "bun.lock",
             Ecosystem::Cargo => "Cargo.lock",
         };
         let file = OpenOptions::new()
@@ -74,6 +80,9 @@ impl Summary {
         }
         let packages = match ecosystem {
             Ecosystem::Npm => npm(&serde_json::from_slice(&bytes).ok()?)?,
+            Ecosystem::Pnpm => pnpm(&serde_yaml_ng::from_slice(&bytes).ok()?)?,
+            Ecosystem::Yarn => yarn(std::str::from_utf8(&bytes).ok()?)?,
+            Ecosystem::Bun => bun(&json5::from_str(std::str::from_utf8(&bytes).ok()?).ok()?)?,
             Ecosystem::Cargo => cargo(std::str::from_utf8(&bytes).ok()?)?,
         };
         let summary = Self {
@@ -203,6 +212,116 @@ fn safe(value: &str, max: usize) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"@/_.+-".contains(&b))
 }
 
+fn pnpm(lock: &serde_yaml_ng::Value) -> Option<BTreeSet<Entry>> {
+    if lock["lockfileVersion"].as_str() != Some("9.0") {
+        return None;
+    }
+    let Some(packages) = lock["packages"].as_mapping() else {
+        return Some(BTreeSet::new());
+    };
+    Some(
+        packages
+            .iter()
+            .filter_map(|(locator, value)| {
+                let (name, version) = locator.as_str()?.rsplit_once('@')?;
+                safe(version, 80).then(|| Entry {
+                    name: name.into(),
+                    version: version.into(),
+                    integrity: value["resolution"]["integrity"].as_str().map(str::to_owned),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn yarn(text: &str) -> Option<BTreeSet<Entry>> {
+    if text.lines().any(|line| line == "__metadata:") {
+        let lock: serde_yaml_ng::Value = serde_yaml_ng::from_str(text).ok()?;
+        return Some(
+            lock.as_mapping()?
+                .values()
+                .filter_map(|value| {
+                    let locator = value["resolution"].as_str()?;
+                    let (name, reference) = locator.trim_start_matches('@').split_once('@')?;
+                    if reference.starts_with("workspace:") {
+                        return None;
+                    }
+                    let name = if locator.starts_with('@') {
+                        format!("@{name}")
+                    } else {
+                        name.into()
+                    };
+                    Some(Entry {
+                        name,
+                        version: value["version"].as_str()?.into(),
+                        integrity: value["checksum"].as_str().map(str::to_owned),
+                    })
+                })
+                .collect(),
+        );
+    }
+    if !text.lines().any(|line| line == "# yarn lockfile v1") {
+        return None;
+    }
+    let mut entries = BTreeSet::new();
+    let mut current: Option<Entry> = None;
+    for line in text.lines().chain(["# end"]) {
+        if !line.is_empty() && !line.starts_with(' ') {
+            if let Some(entry) = current.take().filter(|e| !e.version.is_empty()) {
+                entries.insert(entry);
+            }
+            let name = line
+                .trim_start_matches('"')
+                .trim_start_matches('@')
+                .split_once('@')
+                .map(|(name, _)| name);
+            if let Some(name) = name.filter(|_| !line.starts_with('#')) {
+                current = Some(Entry {
+                    name: if line.trim_start_matches('"').starts_with('@') {
+                        format!("@{name}")
+                    } else {
+                        name.into()
+                    },
+                    version: String::new(),
+                    integrity: None,
+                });
+            }
+        } else if let Some(entry) = &mut current {
+            if let Some(version) = line.strip_prefix("  version ") {
+                entry.version = version.trim_matches('"').into();
+            } else if let Some(integrity) = line.strip_prefix("  integrity ") {
+                entry.integrity = Some(integrity.into());
+            }
+        }
+    }
+    Some(entries)
+}
+
+fn bun(lock: &serde_json::Value) -> Option<BTreeSet<Entry>> {
+    if !matches!(lock["lockfileVersion"].as_u64(), Some(1 | 2)) {
+        return None;
+    }
+    Some(
+        lock["packages"]
+            .as_object()?
+            .values()
+            .filter_map(|value| {
+                let fields = value.as_array()?;
+                let (name, version) = fields.first()?.as_str()?.rsplit_once('@')?;
+                safe(version, 80).then(|| Entry {
+                    name: name.into(),
+                    version: version.into(),
+                    integrity: fields
+                        .last()
+                        .and_then(|v| v.as_str())
+                        .filter(|s| s.starts_with("sha"))
+                        .map(str::to_owned),
+                })
+            })
+            .collect(),
+    )
+}
+
 fn npm(lock: &serde_json::Value) -> Option<BTreeSet<Entry>> {
     if !matches!(lock["lockfileVersion"].as_u64(), Some(2 | 3)) {
         return None;
@@ -254,4 +373,36 @@ fn cargo(text: &str) -> Option<BTreeSet<Entry>> {
             })
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn summarizes_registry_lockfile_entries() {
+        let pnpm = serde_yaml_ng::from_str(
+            "lockfileVersion: '9.0'\npackages:\n  '@scope/pkg@1.2.3':\n    resolution: { integrity: sha512-test }\n",
+        )
+        .unwrap();
+        let berry = "__metadata:\n  version: 8\n\"@scope/pkg@npm:^1\":\n  version: 1.2.3\n  resolution: \"@scope/pkg@npm:1.2.3\"\n  checksum: sha512-test\n";
+        let classic = "# yarn lockfile v1\n\"@scope/pkg@^1\":\n  version \"1.2.3\"\n  integrity sha512-test\n";
+        let bun = json5::from_str(
+            r#"{lockfileVersion:2,packages:{"@scope/pkg":["@scope/pkg@1.2.3","",{},"sha512-test"],},}"#,
+        )
+        .unwrap();
+        let expected = BTreeSet::from([Entry {
+            name: "@scope/pkg".into(),
+            version: "1.2.3".into(),
+            integrity: Some("sha512-test".into()),
+        }]);
+        for parsed in [
+            self::pnpm(&pnpm),
+            yarn(berry),
+            yarn(classic),
+            self::bun(&bun),
+        ] {
+            assert_eq!(parsed.unwrap(), expected);
+        }
+    }
 }

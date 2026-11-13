@@ -324,6 +324,9 @@ impl Runner<'_> {
             comparison: Default::default(),
             attribute_npm: false,
             no_attribute: true,
+            json: false,
+            shorthand: false,
+            save_baseline: false,
         };
         let execution = Execution {
             cwd: project.path(),

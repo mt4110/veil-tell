@@ -195,17 +195,24 @@ impl Baseline {
             .zip(current.lockfile.as_ref())
             .and_then(|(old, new)| Some((old.compare(new)?, new)))
         {
-            for endpoint in &diff.added {
+            let destinations = diff
+                .added
+                .iter()
+                .map(|e| (&e.host, Some(e.port), &e.attribution));
+            let attempts = diff
+                .attempted_added
+                .iter()
+                .map(|e| (&e.host, None, &e.attribution));
+            for (host, port, attribution) in destinations.chain(attempts) {
                 let unknown = crate::attribution::Attribution::unknown();
-                let sources = endpoint
-                    .attribution
+                let sources = attribution
                     .iter()
-                    .chain(endpoint.attribution.is_empty().then_some(&unknown));
+                    .chain(attribution.is_empty().then_some(&unknown));
                 for source in sources {
                     if let Some(evidence) = changes.label(source.package.as_ref(), summary) {
                         diff.lockfile_evidence.push(LockEvidence {
-                            host: endpoint.host.clone(),
-                            port: endpoint.port,
+                            host: host.clone(),
+                            port,
                             source: source.clone(),
                             evidence,
                         });
@@ -235,7 +242,7 @@ struct CountChange {
 #[derive(Serialize)]
 struct LockEvidence {
     host: String,
-    port: u16,
+    port: Option<u16>,
     source: crate::attribution::Attribution,
     #[serde(flatten)]
     evidence: crate::lockfile::Evidence,
@@ -287,13 +294,14 @@ impl Comparison {
         !self.added.is_empty() || !self.attempted_added.is_empty()
     }
 
-    pub fn display(&self, automatic: bool) {
+    pub fn display(&self, automatic: bool, volume_anomaly: bool) {
         let message = match self.status {
             "new_destinations_only" => {
                 "New destinations before command failure / コマンド失敗までに観測した新規宛先"
             }
             "created" => "Baseline saved / 基準を保存しました",
             "skipped" => "Comparison skipped / 比較を見送りました",
+            _ if volume_anomaly => "Volume anomaly / 送信量の異常",
             _ if !self.has_new() => "No new destinations / 新しい送り先はありません",
             _ => "Destination changes / 宛先の変化",
         };
@@ -311,13 +319,13 @@ impl Comparison {
                     && self
                         .lockfile_evidence
                         .iter()
-                        .any(|x| x.host == e.host && x.port == e.port))
+                        .any(|x| x.host == e.host && x.port == Some(e.port)))
                 .then_some(&unknown),
             ) {
                 let suffix = self
                     .lockfile_evidence
                     .iter()
-                    .find(|x| x.host == e.host && x.port == e.port && x.source == *source)
+                    .find(|x| x.host == e.host && x.port == Some(e.port) && x.source == *source)
                     .map(|x| format!(", {}", x.evidence.label))
                     .unwrap_or_default();
                 if let Some(pkg) = &source.package {
@@ -335,6 +343,13 @@ impl Comparison {
         }
         for e in &self.attempted_added {
             eprintln!("  + attempted (blocked) / 名前解決の試み: {}", e.host);
+            for evidence in self
+                .lockfile_evidence
+                .iter()
+                .filter(|row| row.port.is_none() && row.host == e.host)
+            {
+                eprintln!("    {}", evidence.evidence.label);
+            }
         }
         for e in &self.removed {
             eprintln!(
@@ -346,12 +361,14 @@ impl Comparison {
             "commit the baseline: git add .veil-tell / 基準をコミット: git add .veil-tell"
         } else if automatic && self.has_new() {
             "review, then veil-tell accept / 調査後、承認するなら veil-tell accept"
+        } else if volume_anomaly {
+            "review volume_anomalies / レポートの送信量と上限を確認"
         } else if self.status == "skipped" {
             "fix the run and repeat the command / 実行を直して同じコマンドを再実行"
         } else if self.has_new() {
             "review the new destinations in this report / レポートの新規宛先を調査"
         } else {
-            return;
+            "repeat the same check after the next dependency update / 次の依存更新後に同じチェックを実行"
         };
         eprintln!("Next / 次: {next}");
     }
@@ -427,7 +444,7 @@ fn command_key(command: &[OsString]) -> String {
 }
 
 fn baseline_path(state: &Path, key: &str) -> PathBuf {
-    if matches!(key, "npm" | "cargo") {
+    if crate::manager::NAMES.contains(&key) {
         state.join(format!("{key}.json"))
     } else {
         state.join(format!("baseline-{key}.json"))
@@ -470,14 +487,15 @@ pub struct Session {
 impl Session {
     pub fn prepare(options: &Options, cwd: &Path, command: &[OsString]) -> Result<Self> {
         let state = cwd.join(".veil-tell");
-        let executable = command
-            .first()
-            .and_then(|arg| Path::new(arg).file_name())
-            .and_then(|s| s.to_str());
-        let key = match executable {
-            Some(name @ ("npm" | "cargo")) => name.to_owned(),
-            _ => command_key(command),
-        };
+        let manager =
+            crate::manager::executable(command).filter(|name| crate::manager::NAMES.contains(name));
+        let key = if options.ci {
+            manager
+        } else {
+            crate::manager::install_key(command)
+        }
+        .map(str::to_owned)
+        .unwrap_or_else(|| command_key(command));
         let default = baseline_path(&state, &key);
         let mut before = if let Some(input) = &options.input {
             Some(baseline(input).map_err(|e| error(format!(
@@ -491,7 +509,7 @@ impl Session {
                 ));
             }
             let current = optional_baseline(&default)?;
-            if current.is_none() && matches!(key.as_str(), "npm" | "cargo") {
+            if current.is_none() && crate::manager::NAMES.contains(&key.as_str()) {
                 let exact = baseline_path(&state, &command_key(command));
                 if exact.is_file() && options.ci {
                     Some(baseline(&exact)?)
@@ -508,14 +526,10 @@ impl Session {
                     }
                     optional_baseline(&default)?
                 } else {
-                    if let Ok(files) = fs::read_dir(&state)
-                        && files
-                            .flatten()
-                            .any(|f| f.file_name().to_string_lossy().starts_with("baseline-"))
-                    {
-                        return Err(error(format!(
-                            "review the old baseline, then run veil-tell migrate-baseline {key} .veil-tell/baseline-<hash>.json"
-                        )));
+                    if options.ci {
+                        eprintln!(
+                            "veil-tell: if you have a legacy baseline, review it and run veil-tell migrate-baseline {key} .veil-tell/baseline-<hash>.json"
+                        );
                     }
                     None
                 }
@@ -538,6 +552,12 @@ impl Session {
         let ecosystem = match executable {
             Some("cargo") => Some(Ecosystem::Cargo),
             Some("npm") => Some(Ecosystem::Npm),
+            Some("pnpm") => Some(Ecosystem::Pnpm),
+            Some("yarn") => Some(Ecosystem::Yarn),
+            Some("bun") => Some(Ecosystem::Bun),
+            _ if cwd.join("pnpm-lock.yaml").exists() => Some(Ecosystem::Pnpm),
+            _ if cwd.join("yarn.lock").exists() => Some(Ecosystem::Yarn),
+            _ if cwd.join("bun.lock").exists() => Some(Ecosystem::Bun),
             _ if cwd.join("package-lock.json").exists() => Some(Ecosystem::Npm),
             _ if cwd.join("Cargo.lock").exists() => Some(Ecosystem::Cargo),
             _ => None,
@@ -688,9 +708,58 @@ impl Session {
     }
 }
 
+pub fn clean(cwd: &Path, apply: bool) -> Result<u8> {
+    let state = cwd.join(".veil-tell");
+    if !state.exists() {
+        eprintln!("veil-tell: No legacy baselines / 旧形式の基準はありません");
+        return Ok(0);
+    }
+    let _guard = lock(&state)?;
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&state)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(hash) = name
+            .to_str()
+            .and_then(|s| s.strip_prefix("baseline-"))
+            .and_then(|s| s.strip_suffix(".json"))
+        else {
+            continue;
+        };
+        if hash.len() == 64
+            && hash.bytes().all(|b| b.is_ascii_hexdigit())
+            && entry.file_type()?.is_file()
+            && baseline(&entry.path()).is_ok()
+        {
+            candidates.push(entry.path());
+        }
+    }
+    candidates.sort_unstable();
+    if candidates.is_empty() {
+        eprintln!("veil-tell: No legacy baselines / 旧形式の基準はありません");
+        return Ok(0);
+    }
+    for path in candidates {
+        if apply {
+            fs::remove_file(&path)?;
+            println!("Removed / 削除: {}", path.display());
+        } else {
+            println!("Candidate / 削除候補: {}", path.display());
+        }
+    }
+    if !apply {
+        eprintln!(
+            "Next / 次: review the list, then run veil-tell clean --apply / 確認して削除するなら veil-tell clean --apply"
+        );
+    }
+    Ok(0)
+}
+
 pub fn migrate(cwd: &Path, manager: &str, file: &Path) -> Result<u8> {
-    if !matches!(manager, "npm" | "cargo") {
-        return Err(error("choose npm or cargo for baseline migration"));
+    if !crate::manager::NAMES.contains(&manager) {
+        return Err(error(
+            "choose npm, pnpm, yarn, bun or cargo for baseline migration",
+        ));
     }
     let old = baseline(file)?;
     let state = cwd.join(".veil-tell");
@@ -719,7 +788,7 @@ pub fn accept(cwd: &Path) -> Result<u8> {
             "cannot read pending review: {e}; run the command again / コマンドを再実行してください"
         ))
     })?;
-    if !matches!(pending.key.as_str(), "npm" | "cargo")
+    if !crate::manager::NAMES.contains(&pending.key.as_str())
         && (pending.key.len() != 64 || !pending.key.bytes().all(|b| b.is_ascii_hexdigit()))
     {
         return Err(error("invalid pending command key; run the command again"));

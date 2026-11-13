@@ -8,9 +8,10 @@ Usage:
   veil-tell restrict --backend proxy|isolated --policy FILE [--fail-on-unknown] [--report FILE] [--attribute-npm | --no-attribute] -- COMMAND [ARG...]
   veil-tell verify --source DIR --policy FILE --without HOST:443 --report FILE [--timeout-seconds N] -- COMMAND [ARG...]\n\
   veil-tell ci [--baseline FILE] [--report FILE] [--attribute-npm | --no-attribute] -- COMMAND [ARG...]\n\
-  veil-tell migrate-baseline npm|cargo FILE\n\
+  veil-tell migrate-baseline npm|pnpm|yarn|bun|cargo FILE\n\
+  veil-tell clean [--apply]\n\
   veil-tell accept\n\
-  veil-tell [--no-attribute] COMMAND [ARG...]";
+  veil-tell [--json] [--save-baseline] [--no-attribute] COMMAND [ARG...]";
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -36,13 +37,24 @@ pub struct Options {
     pub command: Vec<OsString>,
     pub attribute_npm: bool,
     pub no_attribute: bool,
+    pub json: bool,
+    pub shorthand: bool,
+    pub save_baseline: bool,
     pub comparison: crate::baseline::Options,
 }
 
 impl Options {
     pub fn parse(mut args: Vec<OsString>) -> Result<Self> {
-        let no_attribute = args.first().is_some_and(|a| a == "--no-attribute");
-        if no_attribute {
+        let mut no_attribute = false;
+        let mut save_baseline = false;
+        let mut json = false;
+        while let Some(flag) = args.first().and_then(|arg| arg.to_str()) {
+            match flag {
+                "--no-attribute" if !no_attribute => no_attribute = true,
+                "--save-baseline" if !save_baseline => save_baseline = true,
+                "--json" if !json => json = true,
+                _ => break,
+            }
             args.remove(0);
         }
         let mut options = Self {
@@ -55,6 +67,9 @@ impl Options {
             command: Vec::new(),
             attribute_npm: false,
             no_attribute,
+            json,
+            shorthand: false,
+            save_baseline,
             comparison: Default::default(),
         };
         match args.first().and_then(|arg| arg.to_str()) {
@@ -65,11 +80,16 @@ impl Options {
             }
             Some("restrict") => options.mode = Mode::Restrict,
             _ if !args.is_empty() && !args[0].to_string_lossy().starts_with('-') => {
-                options.comparison.automatic = true;
+                options.shorthand = true;
                 options.command = args;
                 return Ok(options);
             }
             _ => return Err(error(USAGE)),
+        }
+        if save_baseline {
+            return Err(error(
+                "--save-baseline requires the short form: veil-tell --save-baseline COMMAND",
+            ));
         }
         let mut backend_selected = options.comparison.ci;
         let mut args = args.into_iter().skip(1);
@@ -94,6 +114,7 @@ impl Options {
                             .into(),
                     );
                 }
+                Some("--json") if !options.json => options.json = true,
                 Some("--report") if options.report.is_none() => {
                     options.report = Some(
                         args.next()

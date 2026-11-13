@@ -4,6 +4,7 @@ mod cargo_attribution;
 mod cli;
 mod isolation;
 mod lockfile;
+mod manager;
 mod policy;
 mod proxy;
 mod report;
@@ -46,6 +47,11 @@ fn credential() -> Result<String> {
 
 async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
     let cwd = std::env::current_dir()?.canonicalize()?;
+    let shorthand = options.shorthand;
+    if shorthand {
+        options.comparison.automatic =
+            options.save_baseline || manager::install_key(&options.command).is_some();
+    }
     options.comparison.no_attribute = options.no_attribute;
     let state = cwd.join(".veil-tell");
     if options.comparison.automatic {
@@ -55,6 +61,8 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u
         if !state.is_dir() || state.is_symlink() {
             return Err(error("use a real .veil-tell directory inside this project"));
         }
+    }
+    if shorthand {
         match isolation::probe(&cwd).await {
             Ok(()) => options.backend = Backend::Isolated,
             Err(reason) => {
@@ -86,7 +94,11 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u
             &[]
         },
     };
+    let json = options.json;
     let report = run_command(options, fixture, policy, &mut signals, execution).await?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    }
     Ok(report.run_status.exit_code)
 }
 
@@ -170,7 +182,12 @@ async fn run_command(
         isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
     }
     let secret = credential()?;
-    let executable = Path::new(&options.command[0]).file_name();
+    let executable = manager::executable(&options.command);
+    let node_manager = match executable {
+        Some("pnpm") => Some("pnpm"),
+        Some("yarn") => Some("yarn"),
+        _ => None,
+    };
     let wants_npm = !options.no_attribute
         && (options.attribute_npm || executable.is_some_and(|name| name == "npm"));
     let custom_shell = wants_npm && attribution::custom_npm_shell(cwd, &options.command);
@@ -180,6 +197,7 @@ async fn run_command(
         );
     }
     let attribute_npm = wants_npm && !custom_shell;
+    let attribute_node = !options.no_attribute && node_manager.is_some();
     let attribute_cargo = !options.no_attribute
         && executable.is_some_and(|name| name == "cargo")
         && std::env::var_os("RUSTC_WRAPPER").is_none();
@@ -219,7 +237,7 @@ async fn run_command(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(format!("veil:{secret}"))
         ),
-        attribute_npm: attribute_npm || attribute_cargo,
+        attribute_npm: attribute_npm || attribute_cargo || attribute_node,
         compare_unauthenticated: options.comparison.ci,
         records: report::Records::default(),
         budgets,
@@ -240,7 +258,12 @@ async fn run_command(
         &outputs,
         protected_dirs,
         &secret,
-        (attribute_npm, attribute_cargo),
+        isolation::AttributionConfig {
+            npm: attribute_npm,
+            cargo: attribute_cargo,
+            node_manager,
+            node_attribution: attribute_node,
+        },
     )
     .await?;
     let (stop, stopped) = oneshot::channel();
@@ -254,8 +277,13 @@ async fn run_command(
     let pid = child.id();
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
-    let mut stdout_task =
-        tokio::spawn(async move { tokio::io::copy(&mut stdout, &mut tokio::io::stdout()).await });
+    let mut stdout_task = tokio::spawn(async move {
+        if options.json {
+            tokio::io::copy(&mut stdout, &mut tokio::io::stderr()).await
+        } else {
+            tokio::io::copy(&mut stdout, &mut tokio::io::stdout()).await
+        }
+    });
     let mut stderr_task =
         tokio::spawn(async move { tokio::io::copy(&mut stderr, &mut tokio::io::stderr()).await });
     let mut infrastructure_failure = None;
@@ -417,6 +445,7 @@ async fn run_command(
             "veil-tell: No Node.js DNS attempts recorded / Node.js の名前解決の試みは記録されませんでした"
         );
     }
+    let compare_volume_denial = reason == "volume_limit_exceeded" && options.comparison.ci;
     let comparison = if let Some(session) = comparison {
         let ci_denial = (options.comparison.ci || options.comparison.fail_on_new)
             && reason == "child_failed"
@@ -425,7 +454,7 @@ async fn run_command(
                 .iter()
                 .any(|event| event.reason == "new_destination")
                 || session.has_new_attempt(dns));
-        let mut diff = if exit_code == 0 || ci_denial || volume_blocked && options.comparison.ci {
+        let mut diff = if exit_code == 0 || ci_denial || compare_volume_denial {
             match session.finish(options.backend, &destinations, dns) {
                 Ok(diff) => diff,
                 Err(error) => {
@@ -437,7 +466,7 @@ async fn run_command(
         } else {
             baseline::Comparison::skipped()
         };
-        if ci_denial || volume_blocked && options.comparison.ci {
+        if ci_denial || compare_volume_denial {
             diff.retain_additions();
         }
         if diff.has_new() && (options.comparison.fail_on_new || options.comparison.ci) {
@@ -501,7 +530,25 @@ async fn run_command(
                 }
             }
         }
-        diff.display(options.comparison.automatic);
+        diff.display(
+            options.comparison.automatic,
+            !result.volume_anomalies.is_empty(),
+        );
+    } else if volume_blocked {
+        eprintln!("Next / 次: review volume_anomalies / レポートの送信量と上限を確認");
+    } else if result.run_status.exit_code != 0
+        && matches!(executable, Some("pnpm" | "yarn" | "bun"))
+    {
+        eprintln!(
+            "Next / 次: check the runtime, project cache and registry proxy settings / 実行環境・プロジェクト内キャッシュ・レジストリのプロキシ設定を確認"
+        );
+    } else if options.shorthand {
+        let next = if result.run_status.exit_code == 0 {
+            "veil-tell --save-baseline COMMAND"
+        } else {
+            "fix the command error above and repeat / 上のエラーを直して再実行"
+        };
+        eprintln!("Next / 次: {next}");
     }
     Ok(result)
 }
@@ -527,7 +574,7 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
         || (args.len() == 2
             && matches!(
                 args[0].to_str(),
-                Some("observe" | "restrict" | "ci" | "accept")
+                Some("observe" | "restrict" | "ci" | "accept" | "clean")
             )
             && isolation::is_help(&args[1]))
     {
@@ -537,6 +584,15 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
     if args.first().is_some_and(|arg| arg == "verify") {
         return verify::run(args.into_iter().skip(1), fixture).await;
     }
+    if args.first().is_some_and(|arg| arg == "clean") {
+        return match args.get(1..) {
+            Some([]) => baseline::clean(&std::env::current_dir()?.canonicalize()?, false),
+            Some([flag]) if flag == "--apply" => {
+                baseline::clean(&std::env::current_dir()?.canonicalize()?, true)
+            }
+            _ => Err(error("usage: veil-tell clean [--apply]")),
+        };
+    }
     if args.first().is_some_and(|arg| arg == "migrate-baseline") {
         if let [_, manager, file] = args.as_slice() {
             return baseline::migrate(
@@ -545,7 +601,9 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
                 Path::new(file),
             );
         }
-        return Err(error("usage: veil-tell migrate-baseline npm|cargo FILE"));
+        return Err(error(
+            "usage: veil-tell migrate-baseline npm|pnpm|yarn|bun|cargo FILE",
+        ));
     }
     if args.first().is_some_and(|arg| arg == "accept") {
         if args.len() != 1 {
