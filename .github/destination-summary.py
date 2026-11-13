@@ -13,12 +13,15 @@ def cell(value):
 
 
 def summary(report):
-    print("### veil-tell: new CONNECT destinations")
-    print()
     added = (report.get("comparison") or {}).get("added", [])
     if not added:
-        print("No new CONNECT destinations recorded. Result:", cell(report["run_status"]["reason"]))
+        if (report.get("comparison") or {}).get("status") == "compared":
+            print("No new destinations / 新しい送り先はありません")
+        else:
+            print("Comparison unavailable / 比較できません:", cell(report["run_status"]["reason"]))
         return
+    print("### veil-tell: new CONNECT destinations")
+    print()
     evidence = {
         (item["host"], item["port"], json.dumps(item["source"], sort_keys=True)): item["label"]
         for item in report["comparison"].get("lockfile_evidence", [])

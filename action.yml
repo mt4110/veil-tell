@@ -3,13 +3,16 @@ description: Compare an isolated command against a reviewed CONNECT baseline
 inputs:
   baseline:
     description: Repository-relative baseline path
-    default: .veil-tell/npm-ci.json
+    default: .veil-tell/npm.json
   command:
     description: Shell command to run inside isolation
     default: npm ci
   node-version:
     description: Node.js version to install and make available inside isolation
     default: '26.13.0'
+  pr-comment:
+    description: Post a PR comment when a new destination is found (requires pull-requests write)
+    default: 'false'
 outputs:
   report:
     description: Path to the JSON report
@@ -23,9 +26,27 @@ runs:
         package-manager-cache: false
     - name: Install veil-tell
       shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
       run: |
-        cd "$GITHUB_ACTION_PATH"
-        cargo install --locked --path . --root "$RUNNER_TEMP/veil-tell"
+        set -euo pipefail
+        case "$(uname -s)/$(uname -m)" in
+          Darwin/arm64) platform=macos-arm64 ;;
+          Linux/x86_64) platform=linux-x86_64-gnu ;;
+          *) echo 'No release binary for this runner.' >&2; exit 125 ;;
+        esac
+        version=0.4.0
+        archive="veil-tell-$version-$platform.tar.gz"
+        install_dir="$RUNNER_TEMP/veil-tell"
+        mkdir -p "$install_dir/bin"
+        cd "$install_dir"
+        curl --fail --silent --show-error --location \
+          "https://github.com/mt4110/veil-tell/releases/download/v$version/$archive" -o "$archive"
+        gh attestation verify "$archive" --repo mt4110/veil-tell \
+          --signer-workflow mt4110/veil-tell/.github/workflows/release-build.yml \
+          --source-ref "refs/tags/v$version" --deny-self-hosted-runners
+        tar -xzf "$archive"
+        install -m 755 "veil-tell-$version-$platform/veil-tell" bin/veil-tell
     - name: Compare outbound destinations
       id: check
       shell: bash
@@ -71,4 +92,17 @@ runs:
           python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$state/report.json" >> "$GITHUB_STEP_SUMMARY" ||
             echo 'Could not write the job summary. See the JSON report.' >&2
         fi
+        printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
         exit "$status"
+    - name: Comment on new destinations
+      if: ${{ always() && inputs.pr-comment == 'true' && github.event_name == 'pull_request' && steps.check.outputs.status == '21' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VEIL_PR_NUMBER: ${{ github.event.pull_request.number }}
+        VEIL_REPORT: ${{ steps.check.outputs.report }}
+      run: |
+        set -euo pipefail
+        comment=$(mktemp "$RUNNER_TEMP/veil-tell-comment.XXXXXX")
+        python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$VEIL_REPORT" > "$comment"
+        gh pr comment "$VEIL_PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$comment"
