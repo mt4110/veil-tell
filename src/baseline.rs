@@ -24,6 +24,7 @@ pub struct Options {
     pub fail_on_new: bool,
     pub automatic: bool,
     pub ci: bool,
+    pub no_attribute: bool,
 }
 
 impl Options {
@@ -237,10 +238,6 @@ impl Comparison {
         !self.added.is_empty()
     }
 
-    fn changed(&self) -> bool {
-        self.has_new() || !self.removed.is_empty() || !self.count_changes.is_empty()
-    }
-
     pub fn display(&self, automatic: bool) {
         let message = match self.status {
             "new_destinations_only" => {
@@ -248,7 +245,7 @@ impl Comparison {
             }
             "created" => "Baseline saved / 基準を保存しました",
             "skipped" => "Comparison skipped / 比較を見送りました",
-            _ if !self.changed() => "No destination changes / 宛先の変化なし",
+            _ if !self.has_new() => "No new destinations / 新しい送り先はありません",
             _ => "Destination changes / 宛先の変化",
         };
         eprintln!("veil-tell: {message}");
@@ -288,19 +285,21 @@ impl Comparison {
             }
         }
         for e in &self.removed {
-            eprintln!("  - {}:{} ({})", e.host, e.port, e.attempts);
+            eprintln!(
+                "  not observed this run / 今回は未観測: {}:{}",
+                e.host, e.port
+            );
         }
-        for e in &self.count_changes {
-            eprintln!("  ~ {}:{} ({} -> {})", e.host, e.port, e.before, e.after);
-        }
-        let next = if self.has_new() && !automatic {
-            "veil-tell --help (review the new destinations before updating the baseline) / 新規宛先を調査してから基準を更新してください"
-        } else if automatic && self.changed() {
+        let next = if self.created() && automatic {
+            "commit the baseline: git add .veil-tell / 基準をコミット: git add .veil-tell"
+        } else if automatic && self.has_new() {
             "review, then veil-tell accept / 調査後、承認するなら veil-tell accept"
         } else if self.status == "skipped" {
             "fix the run and repeat the command / 実行を直して同じコマンドを再実行"
+        } else if self.has_new() {
+            "review the new destinations in this report / レポートの新規宛先を調査"
         } else {
-            "veil-tell --help"
+            return;
         };
         eprintln!("Next / 次: {next}");
     }
@@ -376,7 +375,11 @@ fn command_key(command: &[OsString]) -> String {
 }
 
 fn baseline_path(state: &Path, key: &str) -> PathBuf {
-    state.join(format!("baseline-{key}.json"))
+    if matches!(key, "npm" | "cargo") {
+        state.join(format!("{key}.json"))
+    } else {
+        state.join(format!("baseline-{key}.json"))
+    }
 }
 
 fn lock(state: &Path) -> Result<File> {
@@ -415,7 +418,14 @@ pub struct Session {
 impl Session {
     pub fn prepare(options: &Options, cwd: &Path, command: &[OsString]) -> Result<Self> {
         let state = cwd.join(".veil-tell");
-        let key = command_key(command);
+        let executable = command
+            .first()
+            .and_then(|arg| Path::new(arg).file_name())
+            .and_then(|s| s.to_str());
+        let key = match executable {
+            Some(name @ ("npm" | "cargo")) => name.to_owned(),
+            _ => command_key(command),
+        };
         let default = baseline_path(&state, &key);
         let mut before = if let Some(input) = &options.input {
             Some(baseline(input).map_err(|e| error(format!(
@@ -428,7 +438,38 @@ impl Session {
                     ".veil-tell must be a real directory; move its files into this workspace",
                 ));
             }
-            optional_baseline(&default)?
+            let current = optional_baseline(&default)?;
+            if current.is_none() && matches!(key.as_str(), "npm" | "cargo") {
+                let exact = baseline_path(&state, &command_key(command));
+                if exact.is_file() && options.ci {
+                    Some(baseline(&exact)?)
+                } else if exact.is_file() {
+                    let _guard = lock(&state)?;
+                    if optional_baseline(&default)?.is_none() {
+                        let legacy = baseline(&exact)?;
+                        OutputFile::prepare(&default, "baseline")?
+                            .save(|file| write_json(file, &legacy, MAX_BYTES))?;
+                        eprintln!(
+                            "veil-tell: Migrated baseline / 基準を移行しました: {}",
+                            default.display()
+                        );
+                    }
+                    optional_baseline(&default)?
+                } else {
+                    if let Ok(files) = fs::read_dir(&state)
+                        && files
+                            .flatten()
+                            .any(|f| f.file_name().to_string_lossy().starts_with("baseline-"))
+                    {
+                        return Err(error(format!(
+                            "review the old baseline, then run veil-tell migrate-baseline {key} .veil-tell/baseline-<hash>.json"
+                        )));
+                    }
+                    None
+                }
+            } else {
+                current
+            }
         } else {
             None
         };
@@ -449,6 +490,7 @@ impl Session {
             _ if cwd.join("Cargo.lock").exists() => Some(Ecosystem::Cargo),
             _ => None,
         };
+        let ecosystem = ecosystem.filter(|_| !options.no_attribute);
         let initial_lock = ecosystem.and_then(|kind| Summary::read(cwd, kind));
         if options.ci
             && let Some(root) = std::env::var_os("VEIL_TELL_PR_BASE_LOCK_DIR")
@@ -513,7 +555,12 @@ impl Session {
             }
             if let Some(before) = before {
                 let diff = before.compare(&current);
-                if diff.changed() {
+                if diff.has_new() {
+                    let mut current = current;
+                    current.destinations.extend(diff.removed.iter().cloned());
+                    current
+                        .destinations
+                        .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
                     replace(
                         &state.join("pending.json"),
                         &Pending {
@@ -544,6 +591,23 @@ impl Session {
     }
 }
 
+pub fn migrate(cwd: &Path, manager: &str, file: &Path) -> Result<u8> {
+    if !matches!(manager, "npm" | "cargo") {
+        return Err(error("choose npm or cargo for baseline migration"));
+    }
+    let old = baseline(file)?;
+    let state = cwd.join(".veil-tell");
+    let _guard = lock(&state)?;
+    let path = baseline_path(&state, manager);
+    OutputFile::prepare(&path, "baseline")?.save(|file| write_json(file, &old, MAX_BYTES))?;
+    eprintln!(
+        "veil-tell: Migrated baseline / 基準を移行しました: {}",
+        path.display()
+    );
+    eprintln!("Next / 次: git add .veil-tell/{manager}.json");
+    Ok(0)
+}
+
 pub fn accept(cwd: &Path) -> Result<u8> {
     let state = cwd.join(".veil-tell");
     if !state.is_dir() {
@@ -558,11 +622,18 @@ pub fn accept(cwd: &Path) -> Result<u8> {
             "cannot read pending review: {e}; run the command again / コマンドを再実行してください"
         ))
     })?;
-    if pending.key.len() != 64 || !pending.key.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !matches!(pending.key.as_str(), "npm" | "cargo")
+        && (pending.key.len() != 64 || !pending.key.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
         return Err(error("invalid pending command key; run the command again"));
     }
     pending.before.validate()?;
     pending.after.validate()?;
+    if !pending.before.compare(&pending.after).has_new() {
+        return Err(error(
+            "this pending review has no new destinations; run the command again to clear it",
+        ));
+    }
     let destination = baseline_path(&state, &pending.key);
     if baseline(&destination)? != pending.before {
         return Err(error(
@@ -646,7 +717,7 @@ mod tests {
             (diff.count_changes[0].before, diff.count_changes[0].after),
             (2, 5)
         );
-        assert!(!before.compare(&before).changed());
+        assert!(!before.compare(&before).has_new());
     }
 
     #[test]

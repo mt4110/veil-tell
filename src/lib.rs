@@ -43,8 +43,31 @@ fn credential() -> Result<String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random))
 }
 
-async fn run(options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
+async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
     let cwd = std::env::current_dir()?.canonicalize()?;
+    options.comparison.no_attribute = options.no_attribute;
+    let state = cwd.join(".veil-tell");
+    if options.comparison.automatic {
+        if !state.exists() {
+            std::fs::create_dir_all(&state)?;
+        }
+        if !state.is_dir() || state.is_symlink() {
+            return Err(error("use a real .veil-tell directory inside this project"));
+        }
+        match isolation::probe(&cwd).await {
+            Ok(()) => options.backend = Backend::Isolated,
+            Err(reason) => {
+                let setup = if cfg!(target_os = "linux") {
+                    "sudo apt-get install bubblewrap (Ubuntu; requires unprivileged namespaces)"
+                } else {
+                    "test -x /usr/bin/sandbox-exec"
+                };
+                eprintln!(
+                    "veil-tell: isolation unavailable ({reason}); observing via proxy. Direct connections are not visible / 直接通信は見えていません。隔離を使うには: {setup}"
+                );
+            }
+        }
+    }
     let policy = options
         .policy
         .as_deref()
@@ -56,7 +79,11 @@ async fn run(options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
         cwd: &cwd,
         timeout: None,
         protected_outputs: &[],
-        protected_dirs: &[],
+        protected_dirs: if options.comparison.automatic {
+            &[state.as_path()]
+        } else {
+            &[]
+        },
     };
     let report = run_command(options, fixture, policy, &mut signals, execution).await?;
     Ok(report.run_status.exit_code)
@@ -142,15 +169,18 @@ async fn run_command(
         isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
     }
     let secret = credential()?;
-    let attribute_npm = options.attribute_npm
-        || (options.comparison.requested()
-            && Path::new(&options.command[0])
-                .file_name()
-                .is_some_and(|name| name == "npm"));
-    let attribute_cargo = options.comparison.requested()
-        && Path::new(&options.command[0])
-            .file_name()
-            .is_some_and(|name| name == "cargo")
+    let executable = Path::new(&options.command[0]).file_name();
+    let wants_npm = !options.no_attribute
+        && (options.attribute_npm || executable.is_some_and(|name| name == "npm"));
+    let custom_shell = wants_npm && attribution::custom_npm_shell(cwd, &options.command);
+    if custom_shell {
+        eprintln!(
+            "veil-tell: using the configured npm script-shell; npm attribution is off / npm の既存シェル設定を使用するため帰属を無効化しました"
+        );
+    }
+    let attribute_npm = wants_npm && !custom_shell;
+    let attribute_cargo = !options.no_attribute
+        && executable.is_some_and(|name| name == "cargo")
         && std::env::var_os("RUSTC_WRAPPER").is_none();
     let proxy = Arc::new(proxy::Proxy {
         mode: options.mode,
@@ -170,6 +200,7 @@ async fn run_command(
             base64::engine::general_purpose::STANDARD.encode(format!("veil:{secret}"))
         ),
         attribute_npm: attribute_npm || attribute_cargo,
+        compare_unauthenticated: options.comparison.ci,
         records: report::Records::default(),
         incomplete: AtomicBool::new(false),
         interfaces: proxy::host_interfaces()?,
@@ -412,6 +443,16 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
     }
     if args.first().is_some_and(|arg| arg == "verify") {
         return verify::run(args.into_iter().skip(1), fixture).await;
+    }
+    if args.first().is_some_and(|arg| arg == "migrate-baseline") {
+        if let [_, manager, file] = args.as_slice() {
+            return baseline::migrate(
+                &std::env::current_dir()?,
+                manager.to_str().unwrap_or(""),
+                Path::new(file),
+            );
+        }
+        return Err(error("usage: veil-tell migrate-baseline npm|cargo FILE"));
     }
     if args.first().is_some_and(|arg| arg == "accept") {
         if args.len() != 1 {

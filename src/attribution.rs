@@ -213,3 +213,72 @@ pub fn annotate(shell: &mut std::process::Command, package: Option<Package>) {
         }
     }
 }
+
+pub fn custom_npm_shell(cwd: &Path, command: &[OsString]) -> bool {
+    let cli_config = command
+        .iter()
+        .skip(1)
+        .take_while(|arg| *arg != "--")
+        .any(|arg| {
+            arg.to_str().is_some_and(|s| {
+                s.starts_with("--script-shell")
+                    || s.starts_with("--userconfig")
+                    || s.starts_with("--globalconfig")
+            })
+        });
+    let env_config = std::env::vars_os().any(|(key, _)| {
+        [
+            "npm_config_script_shell",
+            "npm_config_userconfig",
+            "npm_config_globalconfig",
+            "npm_config_prefix",
+        ]
+        .iter()
+        .any(|name| key.to_string_lossy().eq_ignore_ascii_case(name))
+    });
+    if cli_config || env_config {
+        return true;
+    }
+    let mut configs: Vec<_> = cwd.ancestors().map(|path| path.join(".npmrc")).collect();
+    if let Some(home) = std::env::var_os("HOME") {
+        configs.push(PathBuf::from(home).join(".npmrc"));
+    }
+    configs.extend(
+        [
+            "/etc/npmrc",
+            "/usr/local/etc/npmrc",
+            "/opt/homebrew/etc/npmrc",
+        ]
+        .map(PathBuf::from),
+    );
+    if let Some(path) = std::env::var_os("PATH")
+        && let Some(npm) = std::env::split_paths(&path)
+            .map(|dir| dir.join("npm"))
+            .find(|path| path.is_file())
+        && let Ok(binary) = npm.canonicalize()
+    {
+        for dir in binary.ancestors().take(6).skip(2) {
+            configs.push(dir.join("etc/npmrc"));
+        }
+    }
+    configs.iter().any(|path| {
+        if !path.exists() {
+            return false;
+        }
+        read_manifest(path)
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .is_none_or(|text| {
+                text.lines().any(|line| {
+                    line.split_once('=').is_some_and(|(key, _)| {
+                        matches!(
+                            key.trim()
+                                .trim_matches(['\'', '"'])
+                                .to_ascii_lowercase()
+                                .as_str(),
+                            "script-shell" | "userconfig" | "globalconfig" | "prefix"
+                        )
+                    })
+                })
+            })
+    })
+}

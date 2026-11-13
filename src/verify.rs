@@ -323,6 +323,7 @@ impl Runner<'_> {
             command: self.config.command.clone(),
             comparison: Default::default(),
             attribute_npm: false,
+            no_attribute: true,
         };
         let execution = Execution {
             cwd: project.path(),

@@ -4,12 +4,13 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 Usage:
-  veil-tell observe [--backend proxy|isolated] [--report FILE] [--emit-policy FILE] [--baseline FILE | --baseline-out FILE] [--fail-on-new] [--attribute-npm] -- COMMAND [ARG...]
-  veil-tell restrict --backend proxy|isolated --policy FILE [--fail-on-unknown] [--report FILE] [--attribute-npm] -- COMMAND [ARG...]
+  veil-tell observe [--backend proxy|isolated] [--report FILE] [--emit-policy FILE] [--baseline FILE | --baseline-out FILE] [--fail-on-new] [--attribute-npm | --no-attribute] -- COMMAND [ARG...]
+  veil-tell restrict --backend proxy|isolated --policy FILE [--fail-on-unknown] [--report FILE] [--attribute-npm | --no-attribute] -- COMMAND [ARG...]
   veil-tell verify --source DIR --policy FILE --without HOST:443 --report FILE [--timeout-seconds N] -- COMMAND [ARG...]\n\
-  veil-tell ci [--baseline FILE] [--report FILE] [--attribute-npm] -- COMMAND [ARG...]\n\
+  veil-tell ci [--baseline FILE] [--report FILE] [--attribute-npm | --no-attribute] -- COMMAND [ARG...]\n\
+  veil-tell migrate-baseline npm|cargo FILE\n\
   veil-tell accept\n\
-  veil-tell COMMAND [ARG...]";
+  veil-tell [--no-attribute] COMMAND [ARG...]";
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -34,11 +35,16 @@ pub struct Options {
     pub fail_on_unknown: bool,
     pub command: Vec<OsString>,
     pub attribute_npm: bool,
+    pub no_attribute: bool,
     pub comparison: crate::baseline::Options,
 }
 
 impl Options {
-    pub fn parse(args: Vec<OsString>) -> Result<Self> {
+    pub fn parse(mut args: Vec<OsString>) -> Result<Self> {
+        let no_attribute = args.first().is_some_and(|a| a == "--no-attribute");
+        if no_attribute {
+            args.remove(0);
+        }
         let mut options = Self {
             mode: Mode::Observe,
             backend: Backend::Proxy,
@@ -48,6 +54,7 @@ impl Options {
             fail_on_unknown: false,
             command: Vec::new(),
             attribute_npm: false,
+            no_attribute,
             comparison: Default::default(),
         };
         match args.first().and_then(|arg| arg.to_str()) {
@@ -122,6 +129,7 @@ impl Options {
                 {
                     options.comparison.fail_on_new = true;
                 }
+                Some("--no-attribute") if !options.no_attribute => options.no_attribute = true,
                 Some("--attribute-npm") if !options.attribute_npm => options.attribute_npm = true,
                 Some("--fail-on-unknown") if !options.fail_on_unknown => {
                     options.fail_on_unknown = true
@@ -133,6 +141,9 @@ impl Options {
                     )));
                 }
             }
+        }
+        if options.attribute_npm && options.no_attribute {
+            return Err(error("choose either --attribute-npm or --no-attribute"));
         }
         if options.command.is_empty() {
             return Err(error("specify a command after --"));

@@ -19,6 +19,7 @@ pub async fn prepare(
     secret: &str,
     attribute_npm: bool,
     attribute_cargo: bool,
+    protected_dirs: &[&Path],
 ) -> Result<Launch> {
     let bwrap = std::env::var_os("VEIL_TELL_BWRAP")
         .map(PathBuf::from)
@@ -106,10 +107,14 @@ pub async fn prepare(
             .arg(crate::cargo_attribution::LINUX_WRAPPER);
         launch.args(["--setenv", "VEIL_TELL_RELAY_CARGO", "1"]);
     }
+    launch.arg("--bind").arg(cwd).arg(cwd);
+    for path in protected_dirs
+        .iter()
+        .filter(|path| path.is_dir() && path.starts_with(cwd))
+    {
+        launch.arg("--ro-bind").arg(path).arg(path);
+    }
     launch
-        .arg("--bind")
-        .arg(cwd)
-        .arg(cwd)
         .arg("--ro-bind")
         .arg(socket)
         .arg(RELAY_SOCKET)

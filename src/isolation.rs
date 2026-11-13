@@ -23,13 +23,21 @@ pub async fn prepare(
     command: &[OsString],
     cwd: &Path,
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] outputs: &[&Path],
-    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] protected_dirs: &[&Path],
+    protected_dirs: &[&Path],
     secret: &str,
     (attribute_npm, attribute_cargo): (bool, bool),
 ) -> Result<Launch> {
     #[cfg(target_os = "linux")]
     if backend == Backend::Isolated {
-        return linux::prepare(command, cwd, secret, attribute_npm, attribute_cargo).await;
+        return linux::prepare(
+            command,
+            cwd,
+            secret,
+            attribute_npm,
+            attribute_cargo,
+            protected_dirs,
+        )
+        .await;
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -106,6 +114,32 @@ pub async fn prepare(
         temporary,
         npm_wrapper: wrapper,
     })
+}
+
+pub async fn probe(cwd: &Path) -> Result<()> {
+    let mut launch = prepare(
+        Backend::Isolated,
+        &["/usr/bin/true".into()],
+        cwd,
+        &[],
+        &[],
+        &crate::credential()?,
+        (false, false),
+    )
+    .await?;
+    let output =
+        tokio::time::timeout(std::time::Duration::from_secs(5), launch.command.output()).await??;
+    if output.status.success() {
+        return Ok(());
+    }
+    let reason = String::from_utf8_lossy(&output.stderr);
+    Err(error(
+        reason
+            .lines()
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or("sandbox probe failed"),
+    ))
 }
 
 pub fn restricted_env(command: &mut Command, home: &Path) {

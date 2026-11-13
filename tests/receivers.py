@@ -249,8 +249,15 @@ def npm_destination_diff(cli, project, evidence, runtime):
     assert json.loads(baseline.read_text())["destinations"] == []
     automatic = invoke([cli, *args])
     assert automatic.returncode == 0 and "Baseline saved" in automatic.stderr
-    stable = invoke([cli, *args])
-    assert stable.returncode == 0 and "No destination changes" in stable.stderr
+    for _ in range(5):
+        stable = invoke([cli, *args, "--offline"])
+        assert stable.returncode == 0 and "No new destinations" in stable.stderr
+        assert "veil-tell accept" not in stable.stderr
+        assert not (demo / ".veil-tell/pending.json").exists()
+    linked = invoke([cli, "ci", "--", "npm", "ci", *args[2:]])
+    assert linked.returncode == 0 and "No new destinations" in linked.stderr, linked.stderr
+    assert json.loads((demo / ".veil-tell/npm.json").read_text())["backend"] == "isolated"
+    print(f"fixture os={sys.platform} install_to_ci=0 offline_repeats=5 approvals=0")
     manifest = demo / "package.json"
     package = json.loads(manifest.read_text())
     package["dependencies"] = {
@@ -286,13 +293,13 @@ def npm_destination_diff(cli, project, evidence, runtime):
     assert ci_data["destinations"][0]["reason"] == "new_destination"
     automatic = invoke([cli, *args])
     assert automatic.returncode == 0 and "+ postinstall.local:443 (1)" in automatic.stderr
-    default_baseline, = (demo / ".veil-tell").glob("baseline-*.json")
+    default_baseline = demo / ".veil-tell/npm.json"
     assert json.loads(default_baseline.read_text())["destinations"] == []
     accepted = invoke([cli, "accept"])
     assert accepted.returncode == 0, accepted.stderr
     assert json.loads(default_baseline.read_text())["destinations"] == data["comparison"]["added"]
     stable = invoke([cli, *args])
-    assert stable.returncode == 0 and "No destination changes" in stable.stderr
+    assert stable.returncode == 0 and "No new destinations" in stable.stderr
     print(f"fixture os={sys.platform} npm_exit=0 veil_tell_exit=21")
     print("fixture comparison " + json.dumps(data["comparison"], sort_keys=True))
 
@@ -312,6 +319,32 @@ def npm_destination_diff(cli, project, evidence, runtime):
     ], spoof["comparison"]
     print(result.stderr, end="")
     print(f"fixture os={sys.platform} spoof=unknown veil_tell_exit=21")
+
+    # Use the ordinary client to test shell selection and the opt-out.
+    package["dependencies"] = {"veil-tell-demo-postinstall": "file:./postinstall"}
+    manifest.write_text(json.dumps(package))
+    npmrc = demo / ".npmrc"
+    npmrc.write_text("script-shell=/bin/sh\n")
+    custom = evidence / "npm-custom.json"
+    result = invoke([cli, "ci", "--baseline", baseline, "--report", custom, "--", *args])
+    assert result.returncode == 21 and "npm attribution is off" in result.stderr, (result.stdout, result.stderr)
+    assert "attribution" not in json.loads(custom.read_text())["destinations"][0]
+    npmrc.write_text("script-shell=/no-such-veil-test-shell\n")
+    result = invoke([cli, "ci", "--baseline", baseline, "--", *args])
+    assert result.returncode != 0 and "npm attribution is off" in result.stderr and "ENOENT" in result.stderr
+    npmrc.unlink()
+
+    no_attribute = evidence / "npm-no-attribute.json"
+    result = invoke([cli, "ci", "--no-attribute", "--baseline", baseline, "--report", no_attribute, "--", *args])
+    assert result.returncode == 21 and "attribution" not in json.loads(no_attribute.read_text())["destinations"][0]
+    migration = project / "migration"
+    migration.mkdir()
+    if sys.platform == "linux":
+        shutil.copytree(runtime, migration / "runtime", symlinks=True)
+        runtime = migration / "runtime"
+    baseline_upgrade_test(cli, migration, runtime)
+
+
 
 
 def lockfile_destination_diff(cli, project, evidence, runtime):
@@ -402,6 +435,31 @@ def cargo_destination_diff(cli, project, evidence):
     invoke([cli, "observe", "--baseline", baseline, "--report", warm, "--", "cargo", "build"])
     assert json.loads(warm.read_text())["destinations"] == []
     print(f"fixture os={sys.platform} cargo=build.rs exit=21 cached_connects=0")
+
+
+def baseline_upgrade_test(cli, project, runtime):
+    env = dict(os.environ, PATH=f"{runtime / 'bin'}:{os.environ.get('PATH', '/usr/bin:/bin')}")
+    state = project / ".veil-tell"
+    state.mkdir(exist_ok=True)
+    old = state / ("baseline-" + "a" * 64 + ".json")
+    data = {"schema_version": 1, "backend": "proxy", "coverage": "http_connect_requests",
+            "destinations": [{"host": "allowed.test", "port": 443, "attempts": 1}]}
+    old.write_text(json.dumps(data))
+    result = subprocess.run([cli, "migrate-baseline", "npm", old], cwd=project, capture_output=True, text=True)
+    assert result.returncode == 0 and json.loads((state / "npm.json").read_text()) == data
+    assert old.exists()
+    # Known hosts that go quiet never become pending. Exercise a known nonempty baseline.
+    for _ in range(5):
+        result = subprocess.run([cli, "npm", "--version"], cwd=project, env=env, capture_output=True, text=True)
+        assert result.returncode == 0 and "今回は未観測: allowed.test:443" in result.stderr, result.stderr
+        assert "veil-tell accept" not in result.stderr and not (state / "pending.json").exists()
+    if sys.platform == "linux":
+        env = dict(env, VEIL_TELL_BWRAP="/nonexistent/veil-bwrap")
+        result = subprocess.run([cli, "npm", "--version"], cwd=project, env=env, capture_output=True, text=True)
+        assert result.returncode == 0 and "Direct connections are not visible" in result.stderr
+        strict = subprocess.run([cli, "ci", "--", "npm", "--version"], cwd=project, env=env, capture_output=True, text=True)
+        assert strict.returncode == 125 and not strict.stdout
+    print(f"fixture os={sys.platform} known_destination_missing=5 approvals=0 migration=ok")
 
 
 def run(cli, fixture, node_root=None):

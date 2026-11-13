@@ -28,6 +28,7 @@ pub struct Proxy {
     pub ci_hosts: Option<std::collections::BTreeSet<String>>,
     pub auth: String,
     pub attribute_npm: bool,
+    pub compare_unauthenticated: bool,
     pub records: Records,
     pub incomplete: AtomicBool,
     pub interfaces: Vec<IpAddr>,
@@ -178,7 +179,7 @@ enum Head {
 const AUTH_REQUIRED: &str =
     "407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"veil-tell\"";
 
-fn parse(bytes: &[u8], auth: &str, attribute_npm: bool) -> Head {
+fn parse(bytes: &[u8], auth: &str, attribute_npm: bool, compare_unauthenticated: bool) -> Head {
     let mut headers = [httparse::EMPTY_HEADER; 48];
     let mut request = httparse::Request::new(&mut headers);
     let bad = Head::Reject("400 Bad Request");
@@ -224,7 +225,7 @@ fn parse(bytes: &[u8], auth: &str, attribute_npm: bool) -> Head {
                 .map(str::to_owned);
         }
     }
-    if !authorized && !attribute_npm {
+    if !authorized && !attribute_npm && !compare_unauthenticated {
         return Head::Reject(AUTH_REQUIRED);
     }
     let Some((name, port)) = request
@@ -263,16 +264,20 @@ where
         }
         Err(error) => return Err(error),
     };
-    let (host, consumed, authorized, attribution) =
-        match parse(&bytes, &state.auth, state.attribute_npm) {
-            Head::Accept {
-                host,
-                consumed,
-                authorized,
-                attribution,
-            } => (host, consumed, authorized, attribution),
-            Head::Reject(status) => return response(&mut stream, status).await,
-        };
+    let (host, consumed, authorized, attribution) = match parse(
+        &bytes,
+        &state.auth,
+        state.attribute_npm,
+        state.compare_unauthenticated,
+    ) {
+        Head::Accept {
+            host,
+            consumed,
+            authorized,
+            attribution,
+        } => (host, consumed, authorized, attribution),
+        Head::Reject(status) => return response(&mut stream, status).await,
+    };
     let (allowed, reason) = if state
         .ci_hosts
         .as_ref()
@@ -493,17 +498,17 @@ mod tests {
     #[test]
     fn tunnel_requires_session_auth_and_a_strict_authority() {
         let valid = b"CONNECT Allowed.test.:443 HTTP/1.1\r\nProxy-Authorization: Basic token\r\n\r\npayload";
-        let Head::Accept { host, consumed, .. } = parse(valid, "Basic token", false) else {
+        let Head::Accept { host, consumed, .. } = parse(valid, "Basic token", false, false) else {
             panic!("expected a valid CONNECT");
         };
         assert_eq!(host, "allowed.test");
         assert_eq!(&valid[consumed..], b"payload");
         assert!(
-            matches!(parse(valid, "Basic different", false), Head::Reject(status) if status.starts_with("407"))
+            matches!(parse(valid, "Basic different", false, false), Head::Reject(status) if status.starts_with("407"))
         );
         let bad = b"CONNECT allowed.test:443 HTTP/1.1\r\nProxy-Authorization: Basic token\r\nTransfer-Encoding: chunked\r\n\r\n";
         assert!(matches!(
-            parse(bad, "Basic token", false),
+            parse(bad, "Basic token", false, false),
             Head::Reject("400 Bad Request")
         ));
     }
