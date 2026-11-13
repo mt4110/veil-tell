@@ -6,6 +6,7 @@ pub const USAGE: &str = "\
 Usage:
   veil-tell observe [--backend proxy|isolated] [--report FILE] [--emit-policy FILE] -- COMMAND [ARG...]
   veil-tell restrict --backend proxy|isolated --policy FILE [--fail-on-unknown] [--report FILE] -- COMMAND [ARG...]
+  veil-tell verify --source DIR --policy FILE --without HOST:443 --report FILE [--timeout-seconds N] -- COMMAND [ARG...]\n\
   veil-tell COMMAND [ARG...]";
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]

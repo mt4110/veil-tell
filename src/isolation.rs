@@ -22,6 +22,7 @@ pub async fn prepare(
     command: &[OsString],
     cwd: &Path,
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] outputs: &[&Path],
+    #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] protected_dirs: &[&Path],
     secret: &str,
 ) -> Result<Launch> {
     #[cfg(target_os = "linux")]
@@ -41,9 +42,12 @@ pub async fn prepare(
                  (deny mach-lookup mach-register)\n\
                  (allow network-outbound (remote tcp4 \"localhost:{port}\"))\n"
             );
-            for output in outputs {
-                let parent = output.parent().unwrap();
-                let path = parent
+            for directory in outputs
+                .iter()
+                .filter_map(|output| output.parent())
+                .chain(protected_dirs.iter().copied())
+            {
+                let path = directory
                     .to_str()
                     .ok_or_else(|| error("output directory must be UTF-8"))?;
                 profile.push_str(&format!(

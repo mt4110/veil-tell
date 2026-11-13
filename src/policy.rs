@@ -31,7 +31,7 @@ struct PolicyFile {
     rule: Vec<Rule>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Policy(BTreeMap<String, Action>);
 
 impl Policy {
@@ -60,6 +60,17 @@ impl Policy {
             }
         }
         Ok(Self(policy))
+    }
+
+    pub fn denying(&self, host: &str) -> Result<Self> {
+        if !matches!(self.0.get(host), Some(Action::Allow)) {
+            return Err(error(format!(
+                "{host}:443 must have an explicit allow rule"
+            )));
+        }
+        let mut policy = self.clone();
+        policy.0.insert(host.to_owned(), Action::Deny);
+        Ok(policy)
     }
 
     pub fn decision(&self, mode: Mode, host: &str) -> (bool, &'static str) {

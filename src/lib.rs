@@ -3,6 +3,7 @@ mod isolation;
 mod policy;
 mod proxy;
 mod report;
+mod verify;
 
 use base64::Engine;
 use cli::{Backend, Mode, Options};
@@ -10,6 +11,7 @@ use report::{Coverage, OutputFile, Report, RunStatus};
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::net::SocketAddr;
+use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,6 +47,58 @@ async fn run(options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
         .map(policy::Policy::read)
         .transpose()?
         .unwrap_or_default();
+    let mut signals = RunSignals::new()?;
+    let execution = Execution {
+        cwd: &cwd,
+        timeout: None,
+        protected_outputs: &[],
+        protected_dirs: &[],
+    };
+    let report = run_command(options, fixture, policy, &mut signals, execution).await?;
+    Ok(report.run_status.exit_code)
+}
+
+struct RunSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+impl RunSignals {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+        })
+    }
+
+    async fn interrupted(&mut self) -> u8 {
+        tokio::select! {
+            _ = self.interrupt.recv() => 130,
+            _ = self.terminate.recv() => 143,
+        }
+    }
+}
+
+struct Execution<'a> {
+    cwd: &'a Path,
+    timeout: Option<Duration>,
+    protected_outputs: &'a [&'a Path],
+    protected_dirs: &'a [&'a Path],
+}
+
+async fn run_command(
+    options: Options,
+    fixture: Option<FixtureResolver>,
+    policy: policy::Policy,
+    signals: &mut RunSignals,
+    execution: Execution<'_>,
+) -> Result<Report> {
+    let Execution {
+        cwd,
+        timeout,
+        protected_outputs,
+        protected_dirs,
+    } = execution;
     let report = options
         .report
         .as_deref()
@@ -64,9 +118,10 @@ async fn run(options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
         .iter()
         .chain(&policy_output)
         .map(OutputFile::path)
+        .chain(protected_outputs.iter().copied())
         .collect();
     if options.backend == Backend::Isolated {
-        isolation::check_isolated_paths(&cwd, options.policy.as_deref(), &outputs)?;
+        isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
     }
     let secret = credential()?;
     let proxy = Arc::new(proxy::Proxy {
@@ -85,9 +140,15 @@ async fn run(options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
         listener,
         mut command,
         temporary: _temporary,
-    } = isolation::prepare(options.backend, &options.command, &cwd, &outputs, &secret).await?;
-    let mut interrupt = signal(SignalKind::interrupt())?;
-    let mut terminate = signal(SignalKind::terminate())?;
+    } = isolation::prepare(
+        options.backend,
+        &options.command,
+        cwd,
+        &outputs,
+        protected_dirs,
+        &secret,
+    )
+    .await?;
     let (stop, stopped) = oneshot::channel();
     let mut proxy_task = tokio::spawn(proxy::serve(listener, Arc::clone(&proxy), stopped));
     if options.mode == Mode::Observe && options.backend == Backend::Proxy {
@@ -112,12 +173,17 @@ async fn run(options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
             infrastructure_failure = Some((SETUP_FAILURE, "proxy_stopped"));
             None
         }
-        _ = interrupt.recv() => {
-            infrastructure_failure = Some((130, "interrupted"));
+        code = signals.interrupted() => {
+            infrastructure_failure = Some((code, "interrupted"));
             None
         }
-        _ = terminate.recv() => {
-            infrastructure_failure = Some((143, "interrupted"));
+        _ = async {
+            match timeout {
+                Some(duration) => tokio::time::sleep(duration).await,
+                None => std::future::pending().await,
+            }
+        } => {
+            infrastructure_failure = Some((124, "timed_out"));
             None
         }
         status = child.wait() => Some(status?),
@@ -197,29 +263,32 @@ async fn run(options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
         }
         Backend::Isolated => "unconfirmed",
     };
-    if let Some(file) = report {
-        file.save_report(&Report {
-            schema_version: 1,
-            backend: options.backend,
-            mode: options.mode,
-            isolation,
-            coverage: Coverage {
-                proxy: "http_connect_requests",
-                direct_attempt_destinations: "not_observed",
-                proxy_capture: if reason == "proxy_stopped" {
-                    "until_proxy_stopped"
-                } else if reason == "incomplete_capture" {
-                    "incomplete"
-                } else {
-                    "while_running"
-                },
+    let result = Report {
+        schema_version: 1,
+        backend: options.backend,
+        mode: options.mode,
+        isolation,
+        coverage: Coverage {
+            proxy: "http_connect_requests",
+            direct_attempt_destinations: "not_observed",
+            proxy_capture: if reason == "proxy_stopped" {
+                "until_proxy_stopped"
+            } else if reason == "incomplete_capture" {
+                "incomplete"
+            } else if timeout.is_some() && matches!(reason, "timed_out" | "interrupted") {
+                "until_interrupted"
+            } else {
+                "while_running"
             },
-            child_status: status.map(Into::into),
-            run_status: RunStatus { exit_code, reason },
-            destinations,
-        })?;
+        },
+        child_status: status.map(Into::into),
+        run_status: RunStatus { exit_code, reason },
+        destinations,
+    };
+    if let Some(file) = report {
+        file.save_report(&result)?;
     }
-    Ok(exit_code)
+    Ok(result)
 }
 
 async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Result<u8> {
@@ -238,6 +307,9 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
     if args.first().is_some_and(|arg| isolation::is_help(arg)) {
         println!("{}", cli::USAGE);
         return Ok(0);
+    }
+    if args.first().is_some_and(|arg| arg == "verify") {
+        return verify::run(args.into_iter().skip(1), fixture).await;
     }
     run(Options::parse(args)?, fixture).await
 }
