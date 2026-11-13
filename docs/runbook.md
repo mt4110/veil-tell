@@ -471,7 +471,7 @@ jq '{
 
 ## 7. image-drop-input の GitHub Actions で verify を実行する
 
-GitHub ホストの Ubuntu ランナーで、公開版 `v0.2.0` の SHA-256 を照合して実行しました。対象は `feat/release-0.3.5` のコミット `17abe4c` です。同じソース・ロックファイル・初期キャッシュを使い、`registry.npmjs.org:443` の許可だけを切り替えました。 [実測した実行](https://github.com/mt4110/image-drop-input/actions/runs/43370286803)
+GitHub ホストの Ubuntu ランナーで、公開版 `v0.2.0` の SHA-256 を照合して実行しました。各実行では同じソース・ロックファイル・初期キャッシュから試行を始め、`registry.npmjs.org:443` の許可だけを切り替えました。 [作業ブランチ `feat/release-0.3.5` の実行（`17abe4c`）](https://github.com/mt4110/image-drop-input/actions/runs/43370286803) · [`main` の実行（`6f5a477`）](https://github.com/mt4110/image-drop-input/actions/runs/43375110063)
 
 ### 手動実行と Artifact の取得
 
@@ -479,22 +479,24 @@ GitHub ホストの Ubuntu ランナーで、公開版 `v0.2.0` の SHA-256 を�
 
 ```bash
 repo=mt4110/image-drop-input
-gh workflow run veil-tell-verify.yml --repo "$repo" --ref feat/release-0.3.5
+gh workflow run veil-tell-verify.yml --repo "$repo" --ref main
 gh run list --repo "$repo" --workflow veil-tell-verify.yml \
-  --branch feat/release-0.3.5 --event workflow_dispatch
+  --branch main --event workflow_dispatch
 ```
 
-実行一覧で対象の ID を確認し、実行が完了してから Artifact を取得します。以下の `43370286803` は実測時の ID です。新しく実行した場合は、その ID に置き換えます。
+実行一覧で対象の ID を確認し、実行が完了してから Artifact を取得します。以下の `43375110063` は `main` の実測時の ID です。新しく実行した場合は、その ID に置き換えます。
 
 ```bash
-run_id=43370286803
+run_id=43375110063
 gh run view "$run_id" --repo "$repo" --json conclusion,jobs
 gh run download "$run_id" --repo "$repo" --name veil-tell-verify --dir reports
 ```
 
-`Verify npm audit` ステップは `verify` の終了コードをそのまま返します。実測では終了コード `1` でジョブが失敗し、その後 `if: always()` が付いた `Upload verify reports` ステップが成功しました。実行ページの **Artifacts** からも `veil-tell-verify` を取得できます。 [実測時の Artifact](https://github.com/mt4110/image-drop-input/actions/runs/43370286803/artifacts/14011852447)
+`Verify npm audit` ステップは `verify` の終了コードをそのまま返します。実測では終了コード `1` でジョブが失敗し、その後 `if: always()` が付いた `Upload verify reports` ステップが成功しました。実行ページの **Artifacts** からも `veil-tell-verify` を取得できます。 [`main` の Artifact](https://github.com/mt4110/image-drop-input/actions/runs/43375110063/artifacts/14013244113)
 
 ### CI ログと JSON を照合する
+
+`main` のログ・終了コード・両 JSON を照合した結果は、作業ブランチと一致しました。
 
 | レポート | `verdict` / `exit_code` | 実行ログとの照合 |
 | --- | --- | --- |

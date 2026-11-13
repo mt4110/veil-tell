@@ -20,7 +20,7 @@ On **image-drop-input**, we used the published `v0.2.0` binary on macOS with the
 
 On Ubuntu 26.04.1 LTS (`hp-ubuntu`), we ran the published `v0.2.0` binary without sudo. The build and all 216 tests passed with the registry both allowed and blocked. The standalone `npm audit` failed only when the registry was blocked. [Set up Node.js and npm inside Ubuntu isolation (Japanese)](docs/runbook.md#ubuntu-の隔離内で-nodejs-と-npm-を使う)
 
-On GitHub Actions, the cached image-drop-input build and all 216 tests passed with the registry both allowed and blocked. The standalone `npm audit` failed only with the registry blocked. The job failed with exit code `1`, and both `workflow.json` and `audit.json` were available to download. [Workflow run](https://github.com/mt4110/image-drop-input/actions/runs/43370286803) · [Run manually and read the JSON (Japanese)](docs/runbook.md#7-image-drop-input-の-github-actions-で-verify-を実行する)
+On GitHub Actions, we ran image-drop-input on the working branch and with `--ref main`. With the dependency cache populated, the build and all 216 tests passed with the registry allowed and with it blocked. The standalone `npm audit` failed only with the registry blocked. The audit step returned exit code `1`, causing the job to fail. We still downloaded both `workflow.json` and `audit.json`. [Working branch run](https://github.com/mt4110/image-drop-input/actions/runs/43370286803) · [Main branch run](https://github.com/mt4110/image-drop-input/actions/runs/43375110063) · [Run manually and read the JSON (Japanese)](docs/runbook.md#7-image-drop-input-の-github-actions-で-verify-を実行する)
 
 ## Build and run
 
