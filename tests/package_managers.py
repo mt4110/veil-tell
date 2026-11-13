@@ -48,7 +48,7 @@ def test_manager(cli, tool, manager):
             if subprocess.check_output([tool, "--version"], env=env, text=True).startswith("1."):
                 command += ["--offline"]
             else:
-                (project / ".yarnrc.yml").write_text("enableNetwork: false\nenableGlobalCache: false\n")
+                (project / ".yarnrc.yml").write_text("enableNetwork: false\nenableGlobalCache: false\nenableImmutableInstalls: false\n")
 
         def run(args):
             start = time.monotonic()
