@@ -1,9 +1,11 @@
 import base64
+import errno
 import json
 import os
 from pathlib import Path
 import socket
 import sys
+import time
 from urllib.parse import urlsplit
 
 
@@ -24,6 +26,13 @@ def prepare(case):
 
 
 def probe(case):
+    Path("receiver.start").touch()
+    for _ in range(80):
+        if Path("receiver.ready").is_file():
+            break
+        time.sleep(0.25)
+    else:
+        raise RuntimeError("local receiver did not start")
     if case == "unchanged":
         return
     host = "volume.test" if case == "volume" else "new.test"
@@ -42,20 +51,31 @@ def probe(case):
                     conn.sendall(b"X" * 524288)
                     conn.shutdown(socket.SHUT_WR)
                     stream.read()
-                except (ConnectionResetError, BrokenPipeError):
-                    pass
+                except OSError as error:
+                    if error.errno not in (errno.ECONNRESET, errno.EPIPE, errno.ENOTCONN):
+                        raise
 
 
 def receive():
     with socket.socket() as server:
         server.bind(("192.0.1.2", 443))
-        server.listen(1)
-        server.settimeout(120)
+        server.listen()
+        server.settimeout(0.2)
         print("ready", flush=True)
-        conn, _ = server.accept()
-        with conn, conn.makefile("rb") as stream:
-            conn.settimeout(10)
-            print(f"received={len(stream.read())}", flush=True)
+        connections = received = 0
+        deadline = time.monotonic() + 120
+        while not Path("receiver.stop").exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError("receiver did not get a stop signal")
+            try:
+                conn, _ = server.accept()
+            except TimeoutError:
+                continue
+            with conn, conn.makefile("rb") as stream:
+                conn.settimeout(10)
+                connections += 1
+                received += len(stream.read())
+        print(f"connections={connections} received={received}", flush=True)
 
 
 def check():
@@ -76,6 +96,10 @@ def check():
         "new": "<code>new.test:443</code>",
         "volume": "<code>Volume anomaly</code>",
     }
+    receiver = (evidence / "receiver.log").read_text()
+    assert "ready\n" in receiver, receiver
+    expected_receiver = "connections=1 received=131072" if case == "volume" else "connections=0 received=0"
+    assert expected_receiver in receiver.splitlines(), receiver
     if case == "unchanged":
         assert data["run_status"]["reason"] == "completed"
         assert not data["comparison"]["added"] and not data.get("volume_anomalies")
@@ -88,7 +112,6 @@ def check():
         anomaly, = data["volume_anomalies"]
         assert anomaly["host"] == "volume.test" and anomaly["blocked"]
         assert anomaly["observed"]["sent_bytes"] == 131072
-        assert "received=131072" in (evidence / "receiver.log").read_text()
     if case != "unchanged":
         source, = data["destinations"][0]["attribution"]
         assert source["package"]["name"] == "veil-release-smoke"
@@ -100,9 +123,7 @@ def check():
             (evidence / "summary.md").write_text(summary)
             break
     else:
-        # The runner rotates each step's command files; the uploaded summary
-        # remains on the run's Summary page even when the local file is gone.
-        print(f"Verify the uploaded summary on the run page: {expected_summary}")
+        raise AssertionError(f"Action did not write the expected summary: {expected_summary}")
     print(f"case={case} action={os.environ['ACTION_OUTCOME']} child=0 veil-tell={expected}")
 
 
