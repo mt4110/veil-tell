@@ -57,16 +57,20 @@ def probe(address, token):
 
 def receive(listener, count):
     tokens = []
+    previous_timeout = listener.gettimeout()
     listener.settimeout(0.25)
-    while True:
-        try:
-            conn, _ = listener.accept()
-        except TimeoutError:
-            break
-        with conn:
-            conn.settimeout(3)
-            with conn.makefile("rb") as stream:
-                tokens.append(stream.read())
+    try:
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except TimeoutError:
+                break
+            with conn:
+                conn.settimeout(3)
+                with conn.makefile("rb") as stream:
+                    tokens.append(stream.read())
+    finally:
+        listener.settimeout(previous_timeout)
     assert len(tokens) == count, tokens
     return tokens
 
