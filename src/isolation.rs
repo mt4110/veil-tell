@@ -15,6 +15,7 @@ pub struct Launch {
     pub command: Command,
     // Retain the private home or Unix socket directory until the session ends.
     pub temporary: Option<tempfile::TempDir>,
+    pub npm_wrapper: Option<tempfile::TempDir>,
 }
 
 pub async fn prepare(
@@ -24,14 +25,20 @@ pub async fn prepare(
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] outputs: &[&Path],
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] protected_dirs: &[&Path],
     secret: &str,
+    attribute_npm: bool,
 ) -> Result<Launch> {
     #[cfg(target_os = "linux")]
     if backend == Backend::Isolated {
-        return linux::prepare(command, cwd, secret).await;
+        return linux::prepare(command, cwd, secret, attribute_npm).await;
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
+    let wrapper = attribute_npm.then(tempfile::tempdir).transpose()?;
+    let shell = wrapper.as_ref().map(|dir| dir.path().join("npm-shell"));
+    if let Some(path) = &shell {
+        crate::attribution::create_shell(path, &std::env::current_exe()?)?;
+    }
     let (mut launch, temporary) = if backend == Backend::Isolated {
         #[cfg(target_os = "macos")]
         {
@@ -46,6 +53,7 @@ pub async fn prepare(
                 .iter()
                 .filter_map(|output| output.parent())
                 .chain(protected_dirs.iter().copied())
+                .chain(wrapper.as_ref().map(|dir| dir.path()))
             {
                 let path = directory
                     .to_str()
@@ -69,11 +77,15 @@ pub async fn prepare(
     };
     launch.current_dir(cwd);
     set_proxy(&mut launch, port, secret);
+    if let Some(shell) = &shell {
+        crate::attribution::configure(&mut launch, shell, cwd);
+    }
     supervise_stdio(&mut launch);
     Ok(Launch {
         listener: Listener::Tcp(listener),
         command: launch,
         temporary,
+        npm_wrapper: wrapper,
     })
 }
 
@@ -91,18 +103,20 @@ pub fn restricted_env(command: &mut Command, home: &Path) {
     }
 }
 
+pub const PROXY_VARS: [&str; 8] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "npm_config_proxy",
+    "npm_config_https_proxy",
+    "NPM_CONFIG_PROXY",
+    "NPM_CONFIG_HTTPS_PROXY",
+];
+
 pub fn set_proxy(command: &mut Command, port: u16, secret: &str) {
     let url = format!("http://veil:{secret}@127.0.0.1:{port}");
-    for key in [
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "npm_config_proxy",
-        "npm_config_https_proxy",
-        "NPM_CONFIG_PROXY",
-        "NPM_CONFIG_HTTPS_PROXY",
-    ] {
+    for key in PROXY_VARS {
         command.env(key, &url);
     }
     for key in [

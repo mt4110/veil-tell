@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 Usage:
-  veil-tell observe [--backend proxy|isolated] [--report FILE] [--emit-policy FILE] [--baseline FILE | --baseline-out FILE] [--fail-on-new] -- COMMAND [ARG...]
-  veil-tell restrict --backend proxy|isolated --policy FILE [--fail-on-unknown] [--report FILE] -- COMMAND [ARG...]
+  veil-tell observe [--backend proxy|isolated] [--report FILE] [--emit-policy FILE] [--baseline FILE | --baseline-out FILE] [--fail-on-new] [--attribute-npm] -- COMMAND [ARG...]
+  veil-tell restrict --backend proxy|isolated --policy FILE [--fail-on-unknown] [--report FILE] [--attribute-npm] -- COMMAND [ARG...]
   veil-tell verify --source DIR --policy FILE --without HOST:443 --report FILE [--timeout-seconds N] -- COMMAND [ARG...]\n\
-  veil-tell ci [--baseline FILE] [--report FILE] -- COMMAND [ARG...]\n\
+  veil-tell ci [--baseline FILE] [--report FILE] [--attribute-npm] -- COMMAND [ARG...]\n\
   veil-tell accept\n\
   veil-tell COMMAND [ARG...]";
 
@@ -33,6 +33,7 @@ pub struct Options {
     pub emit_policy: Option<PathBuf>,
     pub fail_on_unknown: bool,
     pub command: Vec<OsString>,
+    pub attribute_npm: bool,
     pub comparison: crate::baseline::Options,
 }
 
@@ -46,6 +47,7 @@ impl Options {
             emit_policy: None,
             fail_on_unknown: false,
             command: Vec::new(),
+            attribute_npm: false,
             comparison: Default::default(),
         };
         match args.first().and_then(|arg| arg.to_str()) {
@@ -120,6 +122,7 @@ impl Options {
                 {
                     options.comparison.fail_on_new = true;
                 }
+                Some("--attribute-npm") if !options.attribute_npm => options.attribute_npm = true,
                 Some("--fail-on-unknown") if !options.fail_on_unknown => {
                     options.fail_on_unknown = true
                 }

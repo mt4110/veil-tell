@@ -1,3 +1,4 @@
+mod attribution;
 mod baseline;
 mod cli;
 mod isolation;
@@ -139,6 +140,11 @@ async fn run_command(
         isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
     }
     let secret = credential()?;
+    let attribute_npm = options.attribute_npm
+        || (options.comparison.requested()
+            && Path::new(&options.command[0])
+                .file_name()
+                .is_some_and(|name| name == "npm"));
     let proxy = Arc::new(proxy::Proxy {
         mode: options.mode,
         policy,
@@ -156,6 +162,7 @@ async fn run_command(
             "Basic {}",
             base64::engine::general_purpose::STANDARD.encode(format!("veil:{secret}"))
         ),
+        attribute_npm,
         records: report::Records::default(),
         incomplete: AtomicBool::new(false),
         interfaces: proxy::host_interfaces()?,
@@ -165,6 +172,7 @@ async fn run_command(
         listener,
         mut command,
         temporary: _temporary,
+        npm_wrapper: _npm_wrapper,
     } = isolation::prepare(
         options.backend,
         &options.command,
@@ -172,6 +180,7 @@ async fn run_command(
         &outputs,
         protected_dirs,
         &secret,
+        attribute_npm,
     )
     .await?;
     let (stop, stopped) = oneshot::channel();
@@ -392,9 +401,15 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
 }
 
 pub fn entry(fixture: Option<FixtureResolver>) -> ExitCode {
-    let args = std::env::args_os().skip(1).collect();
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
     let result = (|| {
         isolation::mark_inherited_fds()?;
+        if args
+            .first()
+            .is_some_and(|arg| arg == attribution::WRAPPER_MODE)
+        {
+            return attribution::run_shell(&args[1..]);
+        }
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()

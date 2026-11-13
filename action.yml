@@ -55,5 +55,11 @@ runs:
           cp -R "$(dirname "$(dirname "$node_bin")")/." "$runtime"
           export PATH="$runtime/bin:$PATH"
         fi
-        "$RUNNER_TEMP/veil-tell/bin/veil-tell" ci --baseline "$state/baseline.json" \
-          --report "$state/report.json" -- /bin/sh -ec "$VEIL_COMMAND"
+        status=0
+        "$RUNNER_TEMP/veil-tell/bin/veil-tell" ci --attribute-npm --baseline "$state/baseline.json" \
+          --report "$state/report.json" -- /bin/sh -ec "$VEIL_COMMAND" || status=$?
+        if [[ -f "$state/report.json" ]]; then
+          python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$state/report.json" >> "$GITHUB_STEP_SUMMARY" ||
+            echo 'Could not write the job summary. See the JSON report.' >&2
+        fi
+        exit "$status"

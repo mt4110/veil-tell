@@ -13,7 +13,12 @@ use tokio::time::timeout;
 const RELAY_SOCKET: &str = "/veil-tell-proxy.sock";
 const RELAY_PROGRAM: &str = "/veil-tell-relay";
 
-pub async fn prepare(command: &[OsString], cwd: &Path, secret: &str) -> Result<Launch> {
+pub async fn prepare(
+    command: &[OsString],
+    cwd: &Path,
+    secret: &str,
+    attribute_npm: bool,
+) -> Result<Launch> {
     let bwrap = std::env::var_os("VEIL_TELL_BWRAP")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/usr/bin/bwrap"));
@@ -78,6 +83,15 @@ pub async fn prepare(command: &[OsString], cwd: &Path, secret: &str) -> Result<L
             launch.arg("--setenv").arg(key).arg(value);
         }
     }
+    if attribute_npm {
+        let wrapper = temporary.path().join("npm-shell");
+        crate::attribution::create_shell(&wrapper, Path::new(RELAY_PROGRAM))?;
+        launch
+            .arg("--ro-bind")
+            .arg(wrapper)
+            .arg(crate::attribution::LINUX_SHELL);
+        launch.args(["--setenv", "VEIL_TELL_RELAY_NPM", "1"]);
+    }
     launch
         .arg("--bind")
         .arg(cwd)
@@ -97,6 +111,7 @@ pub async fn prepare(command: &[OsString], cwd: &Path, secret: &str) -> Result<L
         listener: Listener::Unix(listener),
         command: launch,
         temporary: Some(temporary),
+        npm_wrapper: None,
     })
 }
 
@@ -112,6 +127,13 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
     command.args(&args[1..]).kill_on_drop(true);
     restricted_env(&mut command, Path::new("/tmp/veil-tell-home"));
     set_proxy(&mut command, listener.local_addr()?.port(), secret);
+    if std::env::var_os("VEIL_TELL_RELAY_NPM").is_some() {
+        crate::attribution::configure(
+            &mut command,
+            Path::new(crate::attribution::LINUX_SHELL),
+            &std::env::current_dir()?,
+        );
+    }
     let filter = filter();
     // Only async-signal-safe kernel calls are made between fork and exec.
     unsafe {

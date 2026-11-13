@@ -1,7 +1,9 @@
 use crate::Result;
+use crate::attribution::Attribution;
 use crate::cli::Mode;
 use crate::policy::{Policy, normalize_host};
 use crate::report::{Destination, Records};
+use base64::Engine;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -25,6 +27,7 @@ pub struct Proxy {
     pub policy: Policy,
     pub ci_hosts: Option<std::collections::BTreeSet<String>>,
     pub auth: String,
+    pub attribute_npm: bool,
     pub records: Records,
     pub incomplete: AtomicBool,
     pub interfaces: Vec<IpAddr>,
@@ -163,11 +166,19 @@ async fn head(stream: &mut (impl AsyncRead + Unpin)) -> io::Result<Vec<u8>> {
 }
 
 enum Head {
-    Accept { host: String, consumed: usize },
+    Accept {
+        host: String,
+        consumed: usize,
+        authorized: bool,
+        attribution: Option<Attribution>,
+    },
     Reject(&'static str),
 }
 
-fn parse(bytes: &[u8], auth: &str) -> Head {
+const AUTH_REQUIRED: &str =
+    "407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"veil-tell\"";
+
+fn parse(bytes: &[u8], auth: &str, attribute_npm: bool) -> Head {
     let mut headers = [httparse::EMPTY_HEADER; 48];
     let mut request = httparse::Request::new(&mut headers);
     let bad = Head::Reject("400 Bad Request");
@@ -190,12 +201,31 @@ fn parse(bytes: &[u8], auth: &str) -> Head {
         .headers
         .iter()
         .filter(|header| header.name.eq_ignore_ascii_case("proxy-authorization"));
-    if credentials.next().map(|header| header.value) != Some(auth.as_bytes())
-        || credentials.next().is_some()
+    let credential = credentials
+        .next()
+        .and_then(|h| std::str::from_utf8(h.value).ok());
+    let single_credential = credentials.next().is_none() && credential.is_some();
+    let mut authorized = single_credential && credential == Some(auth);
+    let mut source = None;
+    if attribute_npm
+        && !authorized
+        && single_credential
+        && let Some(encoded) = credential.and_then(|h| h.strip_prefix("Basic "))
+        && let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded)
+        && let Some(index) = decoded.iter().position(|b| *b == b'~')
     {
-        return Head::Reject(
-            "407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"veil-tell\"",
-        );
+        authorized = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(&decoded[..index])
+        ) == auth;
+        if authorized {
+            source = std::str::from_utf8(&decoded[index + 1..])
+                .ok()
+                .map(str::to_owned);
+        }
+    }
+    if !authorized && !attribute_npm {
+        return Head::Reject(AUTH_REQUIRED);
     }
     let Some((name, port)) = request
         .path
@@ -209,7 +239,12 @@ fn parse(bytes: &[u8], auth: &str) -> Head {
     let Some(host) = normalize_host(name) else {
         return bad;
     };
-    Head::Accept { host, consumed }
+    Head::Accept {
+        host,
+        consumed,
+        authorized,
+        attribution: attribute_npm.then(|| Attribution::decode(source.as_deref())),
+    }
 }
 
 async fn response(stream: &mut (impl AsyncWrite + Unpin), status: &str) -> io::Result<()> {
@@ -228,16 +263,24 @@ where
         }
         Err(error) => return Err(error),
     };
-    let (host, consumed) = match parse(&bytes, &state.auth) {
-        Head::Accept { host, consumed } => (host, consumed),
-        Head::Reject(status) => return response(&mut stream, status).await,
-    };
+    let (host, consumed, authorized, attribution) =
+        match parse(&bytes, &state.auth, state.attribute_npm) {
+            Head::Accept {
+                host,
+                consumed,
+                authorized,
+                attribution,
+            } => (host, consumed, authorized, attribution),
+            Head::Reject(status) => return response(&mut stream, status).await,
+        };
     let (allowed, reason) = if state
         .ci_hosts
         .as_ref()
         .is_some_and(|hosts| !hosts.contains(&host))
     {
         (false, "new_destination")
+    } else if !authorized {
+        (false, "proxy_authentication")
     } else if local_name(&host) {
         (false, "non_public_destination")
     } else {
@@ -255,8 +298,12 @@ where
             attempts: 1,
             sent_bytes: 0,
             received_bytes: 0,
+            attribution: attribution.into_iter().collect(),
         },
     };
+    if !authorized {
+        return response(&mut stream, AUTH_REQUIRED).await;
+    }
     if !allowed {
         return response(&mut stream, "403 Forbidden").await;
     }
@@ -446,17 +493,17 @@ mod tests {
     #[test]
     fn tunnel_requires_session_auth_and_a_strict_authority() {
         let valid = b"CONNECT Allowed.test.:443 HTTP/1.1\r\nProxy-Authorization: Basic token\r\n\r\npayload";
-        let Head::Accept { host, consumed } = parse(valid, "Basic token") else {
+        let Head::Accept { host, consumed, .. } = parse(valid, "Basic token", false) else {
             panic!("expected a valid CONNECT");
         };
         assert_eq!(host, "allowed.test");
         assert_eq!(&valid[consumed..], b"payload");
         assert!(
-            matches!(parse(valid, "Basic different"), Head::Reject(status) if status.starts_with("407"))
+            matches!(parse(valid, "Basic different", false), Head::Reject(status) if status.starts_with("407"))
         );
         let bad = b"CONNECT allowed.test:443 HTTP/1.1\r\nProxy-Authorization: Basic token\r\nTransfer-Encoding: chunked\r\n\r\n";
         assert!(matches!(
-            parse(bad, "Basic token"),
+            parse(bad, "Basic token", false),
             Head::Reject("400 Bad Request")
         ));
     }

@@ -20,6 +20,8 @@ pub struct Destination {
     pub attempts: u64,
     pub sent_bytes: u64,
     pub received_bytes: u64,
+    #[serde(skip_serializing_if = "crate::attribution::Sources::is_empty")]
+    pub attribution: crate::attribution::Sources,
 }
 
 type DestinationKey = (
@@ -54,6 +56,9 @@ impl Records {
                 total.attempts += event.attempts;
                 total.sent_bytes += event.sent_bytes;
                 total.received_bytes += event.received_bytes;
+                for source in &event.attribution {
+                    crate::attribution::record(&mut total.attribution, source.clone());
+                }
             })
             .or_insert(event);
         true

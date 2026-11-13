@@ -23,9 +23,11 @@ SCRIPT = Path(__file__).resolve()
 DIRECT_ERROR = "EPERM" if sys.platform == "darwin" else "ENETUNREACH"
 
 
-def connect_probe(host, token):
+def connect_probe(host, token, auth_override=None):
     proxy = urlsplit(os.environ["HTTPS_PROXY"])
     credentials = base64.b64encode(f"{proxy.username}:{proxy.password}".encode()).decode()
+    if auth_override is not None:
+        credentials = auth_override
     with socket.create_connection((proxy.hostname, proxy.port), timeout=3) as conn:
         conn.sendall((f"CONNECT {host}:443 HTTP/1.1\r\n"
                       f"Host: {host}:443\r\n"
@@ -184,6 +186,18 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
         event, = data["destinations"]
         assert (event["reason"], event["result"], event["sent_bytes"], event["received_bytes"]) == (
             "new_destination", "blocked", 0, 0)
+        unauthenticated = evidence / "bad-auth.json"
+        result, _ = run_and_receive([
+            cli, "ci", "--attribute-npm", "--baseline", baseline, "--report", unauthenticated, "--",
+            sys.executable, "-B", "probe.py", "invalid-proxy-auth",
+        ], 0)
+        assert result.returncode == 21 and "CONNECT=407" in result.stdout, result.stderr
+        data = json.loads(unauthenticated.read_text())
+        event, = data["destinations"]
+        assert event["attribution"] == [{"confidence": "unknown"}]
+        assert event["reason"] == "new_destination" and event["result"] == "blocked"
+        assert data["comparison"]["added"][0]["host"] == "new.test"
+
         failed = evidence / "failed-child.json"
         result, _ = run_and_receive([
             cli, "ci", "--baseline", baseline, "--report", failed, "--",
@@ -237,7 +251,10 @@ def npm_destination_diff(cli, project, evidence, runtime):
     assert stable.returncode == 0 and "No destination changes" in stable.stderr
     manifest = demo / "package.json"
     package = json.loads(manifest.read_text())
-    package["dependencies"] = {"veil-tell-demo-postinstall": "file:./postinstall"}
+    package["dependencies"] = {
+        "veil-tell-demo-postinstall": "file:./postinstall",
+        "veil-tell-demo-quiet": "file:./quiet",
+    }
     manifest.write_text(json.dumps(package))
     result = invoke([cli, "observe", "--backend", "isolated", "--baseline", baseline,
                      "--fail-on-new", "--report", report, "--", *args])
@@ -247,7 +264,16 @@ def npm_destination_diff(cli, project, evidence, runtime):
     data = json.loads(report.read_text())
     assert data["child_status"]["exit_code"] == 0
     assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
-    assert data["comparison"]["added"] == [{"host": "postinstall.local", "port": 443, "attempts": 1}]
+    inferred = {"confidence": "inferred", "package": {
+        "name": "veil-tell-demo-postinstall", "version": "1.0.0",
+        "script": "postinstall", "path": "postinstall",
+    }}
+    assert data["comparison"]["added"] == [
+        {"host": "postinstall.local", "port": 443, "attempts": 1, "attribution": [inferred]}
+    ], data["comparison"]
+    assert "quiet postinstall" in result.stdout
+    assert "postinstall.local:443 ← veil-tell-demo-postinstall@1.0.0 postinstall (postinstall) [inferred" in result.stderr
+    assert data["destinations"][0]["attribution"] == [inferred]
     assert data["destinations"][0]["reason"] == "non_public_destination"
     ci_report = evidence / "npm-ci-diff.json"
     result = invoke([cli, "ci", "--baseline", baseline, "--report", ci_report, "--", *args])
@@ -267,6 +293,23 @@ def npm_destination_diff(cli, project, evidence, runtime):
     assert stable.returncode == 0 and "No destination changes" in stable.stderr
     print(f"fixture os={sys.platform} npm_exit=0 veil_tell_exit=21")
     print("fixture comparison " + json.dumps(data["comparison"], sort_keys=True))
+
+    package["dependencies"] = {
+        "veil-tell-demo-spoof": "file:./spoof",
+        "veil-tell-demo-quiet": "file:./quiet",
+    }
+    manifest.write_text(json.dumps(package))
+    spoof_report = evidence / "npm-spoof.json"
+    result = invoke([cli, "ci", "--baseline", baseline, "--report", spoof_report, "--", *args])
+    assert result.returncode == 21, (result.stdout, result.stderr)
+    spoof = json.loads(spoof_report.read_text())
+    assert spoof["child_status"]["exit_code"] == 0
+    assert spoof["run_status"]["reason"] == "new_destination"
+    assert spoof["comparison"]["added"] == [
+        {"host": "spoof.local", "port": 443, "attempts": 1, "attribution": [{"confidence": "unknown"}]}
+    ], spoof["comparison"]
+    print(result.stderr, end="")
+    print(f"fixture os={sys.platform} spoof=unknown veil_tell_exit=21")
 
 
 def run(cli, fixture, node_root=None):
@@ -429,6 +472,8 @@ def npm_test(fixture, runtime, project, evidence, policy, ip):
 if __name__ == "__main__":
     if sys.argv[1] == "probe":
         probe(*sys.argv[2:])
+    elif sys.argv[1] == "invalid-proxy-auth":
+        connect_probe("new.test", "new", "aW52YWxpZA==")
     elif sys.argv[1] == "new-destination":
         connect_probe("new.test", "new")
     elif sys.argv[1] == "observe-candidates":

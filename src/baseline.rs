@@ -41,6 +41,8 @@ struct Endpoint {
     host: String,
     port: u16,
     attempts: u64,
+    #[serde(default, skip_serializing_if = "crate::attribution::Sources::is_empty")]
+    attribution: crate::attribution::Sources,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -52,27 +54,28 @@ struct Baseline {
     destinations: Vec<Endpoint>,
 }
 
-type Counts = BTreeMap<(String, u16), u64>;
-
 impl Baseline {
     fn capture(backend: Backend, events: &[Destination]) -> Self {
-        let mut counts = Counts::new();
+        let mut counts = BTreeMap::<_, Endpoint>::new();
         for event in events {
-            let count = counts.entry((event.host.clone(), event.port)).or_default();
-            *count = count.saturating_add(event.attempts);
+            let endpoint = counts
+                .entry((event.host.clone(), event.port))
+                .or_insert_with(|| Endpoint {
+                    host: event.host.clone(),
+                    port: event.port,
+                    attempts: 0,
+                    attribution: Default::default(),
+                });
+            endpoint.attempts = endpoint.attempts.saturating_add(event.attempts);
+            for source in &event.attribution {
+                crate::attribution::record(&mut endpoint.attribution, source.clone());
+            }
         }
         Self {
             schema_version: 1,
             coverage: CAPTURE.into(),
             backend,
-            destinations: counts
-                .into_iter()
-                .map(|((host, port), attempts)| Endpoint {
-                    host,
-                    port,
-                    attempts,
-                })
-                .collect(),
+            destinations: counts.into_values().collect(),
         }
     }
 
@@ -86,6 +89,8 @@ impl Baseline {
         if self.destinations.iter().any(|e| {
             e.port != 443
                 || e.attempts == 0
+                || e.attribution.len() > 5
+                || e.attribution.iter().any(|source| !source.valid())
                 || crate::policy::normalize_host(&e.host).as_deref() != Some(&e.host)
         }) || self
             .destinations
@@ -202,6 +207,16 @@ impl Comparison {
         }
         for e in &self.added {
             eprintln!("  + {}:{} ({})", e.host, e.port, e.attempts);
+            for source in &e.attribution {
+                if let Some(pkg) = &source.package {
+                    eprintln!(
+                        "    {}:{} ← {}@{} {} ({}) [inferred / 推定]",
+                        e.host, e.port, pkg.name, pkg.version, pkg.script, pkg.path
+                    );
+                } else {
+                    eprintln!("    {}:{} ← unknown / 特定できません", e.host, e.port);
+                }
+            }
         }
         for e in &self.removed {
             eprintln!("  - {}:{} ({})", e.host, e.port, e.attempts);
@@ -472,6 +487,7 @@ mod tests {
             attempts,
             sent_bytes: 0,
             received_bytes: 0,
+            attribution: Default::default(),
         }
     }
 

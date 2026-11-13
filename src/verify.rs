@@ -322,6 +322,7 @@ impl Runner<'_> {
             fail_on_unknown: false,
             command: self.config.command.clone(),
             comparison: Default::default(),
+            attribute_npm: false,
         };
         let execution = Execution {
             cwd: project.path(),
