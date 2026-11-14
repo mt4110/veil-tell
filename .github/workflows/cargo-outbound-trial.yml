@@ -1,0 +1,81 @@
+name: Verify veil-tell on Cargo dependency updates
+on:
+  pull_request:
+    branches: [verify/cargo-pr-base]
+    paths: [Cargo.lock, Cargo.toml]
+permissions:
+  contents: read
+  attestations: read
+jobs:
+  cargo-outbound:
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Expose the installed Cargo binary
+        run: |
+          rustup show active-toolchain
+          dirname "$(rustup which cargo)" >> "$GITHUB_PATH"
+      - name: Fetch the checked-in dependencies in isolation
+        uses: mt4110/veil-tell@v0
+        id: cargo
+        with:
+          baseline: .veil-tell/cargo.json
+          command: cargo fetch --locked
+      - name: Check an unregistered CONNECT
+        if: success() && github.head_ref == 'verify/cargo-pr-errno'
+        uses: mt4110/veil-tell@v0
+        id: control
+        continue-on-error: true
+        with:
+          baseline: .veil-tell/cargo.json
+          command: cargo fetch --locked && python3 -B .github/cargo-outbound-control.py
+      - name: Check and save reports
+        if: always()
+        env:
+          NORMAL: ${{ steps.cargo.outputs.report }}
+          CONTROL: ${{ steps.control.outputs.report }}
+          CONTROL_OUTCOME: ${{ steps.control.outcome }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/cargo-outbound"
+          mkdir -p "$evidence"
+          if [[ -n "$NORMAL" && -f "$NORMAL" ]]; then cp "$NORMAL" "$evidence/normal.json"; fi
+          if [[ -n "$CONTROL" && -f "$CONTROL" ]]; then cp "$CONTROL" "$evidence/control.json"; fi
+          jq -e '.backend == "isolated" and .child_status.exit_code == 0
+            and .run_status == {exit_code:0,reason:"completed"}
+            and .comparison.added == []
+            and ([.destinations[].host] | unique) == ["index.crates.io","static.crates.io"]
+            and (.comparison.lockfile_changes.updated | length) == 1' "$evidence/normal.json"
+          if [[ "$HEAD_BRANCH" == verify/cargo-pr-errno ]]; then
+            test "$CONTROL_OUTCOME" = failure
+            jq -e '.backend == "isolated" and .child_status.exit_code == 0
+              and .run_status == {exit_code:21,reason:"new_destination"}
+              and [.comparison.added[].host] == ["veil-cargo-control.test"]
+              and any(.destinations[]; .host == "veil-cargo-control.test" and .result == "blocked" and .sent_bytes == 0)' "$evidence/control.json"
+          fi
+          python3 - "$evidence" <<'PY'
+          import os
+          from pathlib import Path
+          import sys
+          evidence = Path(sys.argv[1])
+          summaries = [
+              p.read_text() for p in Path(os.environ["GITHUB_STEP_SUMMARY"]).parent.glob("step_summary_*")
+          ]
+          markers = {"normal": "No new destinations, attempts or volume anomalies"}
+          if os.environ["HEAD_BRANCH"] == "verify/cargo-pr-errno":
+              markers["control"] = "<code>veil-cargo-control.test:443</code>"
+          for label, marker in markers.items():
+              (summary,) = {s.strip() for s in summaries if marker in s}
+              (evidence / f"{label}-summary.md").write_text(summary + "\n")
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: cargo-outbound-evidence
+          path: ${{ runner.temp }}/cargo-outbound/
+          if-no-files-found: error
