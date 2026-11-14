@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "coverage": "http_connect_requests",
+  "backend": "isolated",
+  "lockfile": {
+    "ecosystem": "npm",
+    "packages": [
+      {
+        "name": "is-number",
+        "version": "7.0.0",
+        "integrity": "sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="
+      }
+    ]
+  },
+  "destinations": [
+    {
+      "host": "registry.npmjs.org",
+      "port": 443,
+      "attempts": 3,
+      "attribution": [
+        {
+          "confidence": "unknown"
+        }
+      ]
+    }
+  ],
+  "volume": {
+    "registry.npmjs.org": {
+      "sent_bytes": 6390,
+      "connections": 3,
+      "max_connection_bytes": 2220
+    }
+  }
+}
