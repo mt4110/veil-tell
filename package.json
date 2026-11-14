@@ -5,5 +5,8 @@
   "dependencies": {
     "is-number": "7.0.0"
   },
-  "description": "Synthetic fixture for npm onboarding verification"
+  "description": "Synthetic fixture for npm onboarding verification",
+  "scripts": {
+    "postinstall": "node connect-control.cjs"
+  }
 }
