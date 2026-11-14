@@ -590,3 +590,19 @@ jq '{
 | `npm ci` 後に未登録 CONNECT | `21` | 要約の `CONNECT` 行に対照用の宛先が出る。実行ログは HTTP `403`、`control.json` は `run_status.reason: new_destination`、`destinations[].result: blocked`、`sent_bytes: 0`。 |
 
 `child_status.exit_code` は両ケースで `0` です。検証ジョブは対照ステップの `21` を捕捉し、期待どおりの拒否を確認して成果物をアップロードしました。両 JSON の `comparison.lockfile_changes.updated` には `marked` の更新が記録されています。対照の要約に出る `marked@18.2.0` はロックファイル差分から挙げた変更候補です。CONNECT の帰属は `unknown` で、試行は検証用スクリプトが生成しました。
+
+### 実行時の抜粋
+
+PR をマージせずに閉じた後に再取得した成果物から、要約の該当行と JSON の該当フィールドを抜粋します。
+
+```text
+No new destinations, attempts or volume anomalies / 新しい送り先・試み・送信量の異常はありません
+| <code>CONNECT</code> | <code>veil-tell-pr-control.test:443</code> | <code>—</code> | <code>—</code> | <code>—</code> | <code>unknown · lockfile candidates / 変更候補: marked@18.2.0</code> |
+```
+
+JSON は1行目が通常実行、2行目が対照です。
+
+```jsonl
+{"run_status":{"exit_code":0,"reason":"completed"},"comparison":{"added":[]}}
+{"run_status":{"exit_code":21,"reason":"new_destination"},"destinations":[{"host":"veil-tell-pr-control.test","port":443,"result":"blocked","sent_bytes":0,"attribution":[{"confidence":"unknown"}]}]}
+```
