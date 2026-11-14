@@ -4,5 +4,6 @@
   "private": true,
   "dependencies": {
     "is-number": "7.0.0"
-  }
+  },
+  "description": "Synthetic fixture for npm onboarding verification"
 }
