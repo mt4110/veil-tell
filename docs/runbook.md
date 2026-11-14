@@ -611,7 +611,7 @@ JSON は1行目が通常実行、2行目が対照です。
 
 対象はルートに `package-lock.json` があり、公開レジストリから認証情報なしで `npm ci` が通る GitHub リポジトリです。テンプレートは GitHub ホストの Ubuntu 26.04 を使い、必要な場合にランナーへ bubblewrap を入れます。
 
-1. [テンプレート](https://github.com/mt4110/veil-tell/blob/23ed8237bfbcf37d29d0c34d18f061ac9f1b33dd/.github/workflows/test.yml) を `.github/workflows/veil-tell-npm.yml` にコピーします。`NODE_VERSION` を普段の npm CI に合わせて、ワークフローを既定ブランチに入れます。
+1. [テンプレート](../examples/github-actions/veil-tell-npm.yml) を `.github/workflows/veil-tell-npm.yml` にコピーします。`NODE_VERSION` を普段の npm CI に合わせて、ワークフローを既定ブランチに入れます。
 2. **Actions → Check npm destinations → Run workflow** で、レビュー済みの既定ブランチを選びます。空のキャッシュで隔離した `npm ci` を実行し、来歴を検証した v0.4.0 で基準候補を採取します。失敗したときはステップログを確認します。 [GitHub の手動実行手順](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)
 3. `veil-tell-baseline-candidate` をダウンロードし、`npm.json` の宛先と用途を確認します。確認できた基準を `.veil-tell/npm.json` としてベースブランチに入れます。基準採取用の `report.json` は調査に使えます。
 4. 次に `package-lock.json` または `package.json` を変更する PR を開きます。結果はジョブ要約と `veil-tell-pr-report` の `report.json` で確認できます。既定では検査ジョブをマージの必須条件にせず、普段の更新で余計な拒否が出ないかを見ます。

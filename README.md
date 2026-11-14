@@ -10,28 +10,7 @@ veil-tell npm install
 veil-tell ci -- npm ci
 ```
 
-依存更新 PR 用の例です。先に `.veil-tell/npm.json` をレビューしてコミットします。
-
-```yaml
-name: Check npm destinations
-on: pull_request
-permissions:
-  contents: read
-jobs:
-  destinations:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - run: |
-          if ! test -x /usr/bin/bwrap; then
-            sudo apt-get update
-            sudo apt-get install -y bubblewrap
-          fi
-      - uses: mt4110/veil-tell@v0
-```
+GitHub Actions で依存更新を検査する場合は、[npm 用テンプレート](examples/github-actions/veil-tell-npm.yml) を自分のリポジトリの `.github/workflows/veil-tell-npm.yml` にコピーします。既定ブランチで **Check npm destinations** を手動実行し、成果物の `npm.json` をレビューして `.veil-tell/npm.json` としてコミットします。次の依存更新 PR から、変更前の基準で `npm ci` を検査します。GitHub 上での導入にローカルの veil-tell は不要です。 [導入手順](docs/runbook.md#10-npm-の依存更新-pr-に導入する)
 
 ### 公開版 v0.4.0 の GitHub Actions 実測
 
