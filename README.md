@@ -37,6 +37,8 @@ jobs:
 
 `uses: mt4110/veil-tell@v0` を macOS 26 と Ubuntu 26.04 で実行し、**変更なしは `0`、新規宛先の拒否は `21`、送信量超過による切断は `22`** を確認しました。両 OS で、送信量超過時は受信ログと JSON が **131,072 バイト**で一致しました。 [macOS の実行](https://github.com/mt4110/veil-tell/actions/runs/43459261848) · [Ubuntu の実行](https://github.com/mt4110/veil-tell/actions/runs/43410515308) · [ジョブ要約・JSON・受信ログの読み方](docs/runbook.md#8-公開版-v040-の-github-actions-実測)
 
+npm 向け導入テンプレートも GitHub Actions の Ubuntu 26.04 で検証しました。手動実行で採取した `registry.npmjs.org:443` の基準候補をレビューし、PR の比較元に保存しました。通常の `npm ci` は **`0`**。未登録 CONNECT を加えると HTTP `403` で拒否され、npm が `0` でも veil-tell は **`21`** でジョブを失敗させ、JSON を残しました。 [検証用 PR #3](https://github.com/mt4110/veil-tell/pull/3) · [基準候補](https://github.com/mt4110/veil-tell/actions/runs/43609198515#summary-132490298343) · [通常実行](https://github.com/mt4110/veil-tell/actions/runs/43609277174#summary-132490539684) · [未登録 CONNECT](https://github.com/mt4110/veil-tell/actions/runs/43609366175#summary-132490812999) · [手順と JSON の読み方](docs/runbook.md#github-actions-での実測と-json-の見方)
+
 image-drop-input の依存更新 PR #75 では、PR 側の基準に対照用の宛先を追加しても、Action は変更前の基準を使いました。通常の `npm ci` は **`0`**、未登録 CONNECT を加えた対照は HTTP `403` で拒否され **`21`** でした。 [PR #75](https://github.com/mt4110/image-drop-input/pull/75) · [実行結果](https://github.com/mt4110/image-drop-input/actions/runs/43460620667) · [ジョブ要約と JSON の読み方](docs/runbook.md#9-image-drop-input-の依存更新-pr-で変更前の基準を確認する)
 
 対応する macOS と Linux で **sudo なし**で使える、**コマンド単位**の通信先チェックです。ローカルプロキシに届いた HTTP CONNECT を記録し、制限モードでは未登録の CONNECT を拒否して **CI を失敗**させられます。veil-tell 自体はテレメトリーを送りません。

@@ -590,3 +590,66 @@ jq '{
 | `npm ci` 後に未登録 CONNECT | `21` | 要約の `CONNECT` 行に対照用の宛先が出る。実行ログは HTTP `403`、`control.json` は `run_status.reason: new_destination`、`destinations[].result: blocked`、`sent_bytes: 0`。 |
 
 `child_status.exit_code` は両ケースで `0` です。検証ジョブは対照ステップの `21` を捕捉し、期待どおりの拒否を確認して成果物をアップロードしました。両 JSON の `comparison.lockfile_changes.updated` には `marked` の更新が記録されています。対照の要約に出る `marked@18.2.0` はロックファイル差分から挙げた変更候補です。CONNECT の帰属は `unknown` で、試行は検証用スクリプトが生成しました。
+
+### 実行時の抜粋
+
+PR をマージせずに閉じた後に再取得した成果物から、要約の該当行と JSON の該当フィールドを抜粋します。
+
+```text
+No new destinations, attempts or volume anomalies / 新しい送り先・試み・送信量の異常はありません
+| <code>CONNECT</code> | <code>veil-tell-pr-control.test:443</code> | <code>—</code> | <code>—</code> | <code>—</code> | <code>unknown · lockfile candidates / 変更候補: marked@18.2.0</code> |
+```
+
+JSON は1行目が通常実行、2行目が対照です。
+
+```jsonl
+{"run_status":{"exit_code":0,"reason":"completed"},"comparison":{"added":[]}}
+{"run_status":{"exit_code":21,"reason":"new_destination"},"destinations":[{"host":"veil-tell-pr-control.test","port":443,"result":"blocked","sent_bytes":0,"attribution":[{"confidence":"unknown"}]}]}
+```
+
+## 10. npm の依存更新 PR に導入する
+
+対象はルートに `package-lock.json` があり、公開レジストリから認証情報なしで `npm ci` が通る GitHub リポジトリです。テンプレートは GitHub ホストの Ubuntu 26.04 を使い、必要な場合にランナーへ bubblewrap を入れます。
+
+1. [テンプレート](https://github.com/mt4110/veil-tell/blob/23ed8237bfbcf37d29d0c34d18f061ac9f1b33dd/.github/workflows/test.yml) を `.github/workflows/veil-tell-npm.yml` にコピーします。`NODE_VERSION` を普段の npm CI に合わせて、ワークフローを既定ブランチに入れます。
+2. **Actions → Check npm destinations → Run workflow** で、レビュー済みの既定ブランチを選びます。空のキャッシュで隔離した `npm ci` を実行し、来歴を検証した v0.4.0 で基準候補を採取します。失敗したときはステップログを確認します。 [GitHub の手動実行手順](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch)
+3. `veil-tell-baseline-candidate` をダウンロードし、`npm.json` の宛先と用途を確認します。確認できた基準を `.veil-tell/npm.json` としてベースブランチに入れます。基準採取用の `report.json` は調査に使えます。
+4. 次に `package-lock.json` または `package.json` を変更する PR を開きます。結果はジョブ要約と `veil-tell-pr-report` の `report.json` で確認できます。既定では検査ジョブをマージの必須条件にせず、普段の更新で余計な拒否が出ないかを見ます。
+
+| 結果 | 次の一手 |
+| --- | --- |
+| `0` | 今回の観測範囲では新規宛先や上限超過なし。通常の依存レビューを続ける。 |
+| `21` | 要約で宛先と帰属の確度を確認する。用途を説明できなければ依存更新を保留する。 |
+| `22` | JSON の `volume_anomalies` にある送信量と上限を照合する。 |
+| `125` などの検査失敗 | ステップログでベースブランチの基準、隔離、配布物の検証を確認する。JSON がある場合は `run_status` も見る。 |
+
+用途を確認できた新規宛先は、保守者のレビューを通して基準に反映します。基準を先にベースブランチへ入れ、依存更新 PR を新しいベースで再実行します。基準とワークフローの両方をレビューし、PR で実行するジョブにシークレットや書き込み権限を渡さない構成にします。
+
+### GitHub Actions での実測と JSON の見方
+
+[検証用 PR #3](https://github.com/mt4110/veil-tell/pull/3) では、Ubuntu 26.04 で公開版 v0.4.0 を使いました。検証ブランチでは既定ブランチに存在する `.github/workflows/test.yml` と同じパスにテンプレートを配置し、そのブランチを指定して手動実行しました。
+
+1. [手動実行のジョブ要約](https://github.com/mt4110/veil-tell/actions/runs/43609198515#summary-132490298343) に表示された `registry.npmjs.org:443` を、[基準候補の成果物](https://github.com/mt4110/veil-tell/actions/runs/43609198515/artifacts/14119593182) の `npm.json` と照合します。候補の宛先はこの1件で、`is-number@7.0.0` のバージョンと `integrity` は `package-lock.json` と一致しました。同梱の `report.json` は `backend: isolated`、`isolation: applied`、`run_status.exit_code: 0` でした。
+2. レビューした候補を PR のベースブランチの `.veil-tell/npm.json` にコミットしました。通常実行と対照は、同じ[基準コミット](https://github.com/mt4110/veil-tell/commit/0d71664b396d3b5dbb72f576e8efd31be8ed5da5)とロックファイルを使いました。対照では、検証用パッケージの `postinstall` に予約ドメイン `veil-npm-control.test:443` への CONNECT を加えました。
+3. 各実行の **Summary** でジョブ要約を開き、**Artifacts** の `veil-tell-pr-report` から `report.json` を取得します。ジョブが失敗した対照でも、成果物を取得できました。
+
+| ケース | ジョブ要約 | JSON と実行ログ |
+| --- | --- | --- |
+| 通常の `npm ci` | 新しい送り先・試み・送信量の異常なし。 [ジョブ要約](https://github.com/mt4110/veil-tell/actions/runs/43609277174#summary-132490539684) | `run_status.exit_code: 0`、`reason: completed`、`comparison.added: []`。 [JSON の成果物](https://github.com/mt4110/veil-tell/actions/runs/43609277174/artifacts/14119790213) |
+| 未登録 CONNECT | 新規宛先の表に `veil-npm-control.test:443` と `postinstall` が載り、承認・マージ前の確認を案内。 [ジョブ要約](https://github.com/mt4110/veil-tell/actions/runs/43609366175#summary-132490812999) | HTTP `403`。 `run_status.exit_code: 21`、`reason: new_destination`。対象の `destinations[]` は `decision: deny`、`result: blocked`、送受信ともに `0` バイト。 [JSON の成果物](https://github.com/mt4110/veil-tell/actions/runs/43609366175/artifacts/14119204412) |
+
+`child_status.exit_code` は両方とも `0` です。ジョブを失敗させた理由は veil-tell 側の `run_status` で確認します。対照の `comparison.added[].attribution` には `veil-tell-npm-template-fixture@1.0.0` の `postinstall` が `inferred`（推定）として記録されています。両 JSON の `coverage.proxy` は `http_connect_requests`、`coverage.direct_attempt_destinations` は `not_observed` です。
+
+```sh
+gh run download 43609198515 -R mt4110/veil-tell -n veil-tell-baseline-candidate -D npm-baseline
+gh run download 43609277174 -R mt4110/veil-tell -n veil-tell-pr-report -D npm-normal
+gh run download 43609366175 -R mt4110/veil-tell -n veil-tell-pr-report -D npm-control
+
+jq '{destinations: [.destinations[] | {host, port}], lockfile}' npm-baseline/npm.json
+jq '{
+  coverage, isolation, child_status, run_status,
+  added: .comparison.added,
+  blocked: [.destinations[] | select(.result == "blocked") |
+    {host, port, decision, reason, result, sent_bytes, received_bytes}]
+}' npm-normal/report.json npm-control/report.json
+```
