@@ -653,3 +653,34 @@ jq '{
     {host, port, decision, reason, result, sent_bytes, received_bytes}]
 }' npm-normal/report.json npm-control/report.json
 ```
+
+### image-drop-input の依存更新 PR #76 での実測
+
+[検証用 PR #76](https://github.com/mt4110/image-drop-input/pull/76) で、依存パッケージ `marked` を `18.1.3` から `18.2.0` に更新しました。Ubuntu 26.04 の GitHub ホストランナーで、veil-tell の `main` にあるテンプレートを検証ブランチの登録済みワークフローパス `.github/workflows/veil-tell-verify.yml` にそのまま置き、手動実行しました。
+
+1. [基準採取のジョブ要約](https://github.com/mt4110/image-drop-input/actions/runs/43687747113#summary-132731680845) に出た `registry.npmjs.org:443` を、[基準候補の成果物](https://github.com/mt4110/image-drop-input/actions/runs/43687747113/artifacts/14150363687) の `npm.json` と照合しました。宛先はこの1件で、ロックファイル要約に記録された275件のパッケージ名・バージョン・integrity は採取時の `package-lock.json` と一致しました。同梱の `report.json` は `isolation: applied`、`run_status.exit_code: 0` でした。
+2. レビュー後、候補を `.veil-tell/npm.json` として[検証用ベースのコミット `30f1201`](https://github.com/mt4110/image-drop-input/commit/30f120153fba104bf1052b2a735bc438fe2a0728) に保存しました。通常実行と対照は、同じ PR のベース・更新済みロックファイル・ワークフローを使いました。対照にだけ、プロジェクトの `postinstall` から予約ドメイン `veil-image-onboarding-control.test:443` への CONNECT を加えました。
+
+| ケース | ジョブ要約 | JSON と実行ログ |
+| --- | --- | --- |
+| 通常の `npm ci` | 新しい送り先・試み・送信量の異常なし。 [ジョブ要約](https://github.com/mt4110/image-drop-input/actions/runs/43687817268#summary-132731890786) | `run_status.exit_code: 0`、`run_status.reason: completed`、`comparison.added: []`。 [JSON の成果物](https://github.com/mt4110/image-drop-input/actions/runs/43687817268/artifacts/14150952903) |
+| 未登録 CONNECT | 表に宛先と `image-drop-input@0.3.5` の `postinstall` が表示され、承認・マージ前の確認を案内。 [ジョブ要約](https://github.com/mt4110/image-drop-input/actions/runs/43687870837#summary-132732049536) | 実行ログは HTTP `403`。JSON は `run_status.exit_code: 21`、`run_status.reason: new_destination`。対象の `destinations[]` は `decision: deny`、`result: blocked`、送受信ともに `0` バイト。 [失敗後に取得した JSON の成果物](https://github.com/mt4110/image-drop-input/actions/runs/43687870837/artifacts/14151385664) |
+
+両方の JSON で、npm 自体の `child_status.exit_code` は `0`、`comparison.lockfile_changes.updated` には `marked` の更新が記録されています。対照の `comparison.added[].attribution` では `postinstall` の帰属は `inferred`（推定）です。報告された観測範囲は `coverage.proxy: http_connect_requests`、直接通信の試行先は `coverage.direct_attempt_destinations: not_observed` です。
+
+```sh
+gh run download 43687747113 -R mt4110/image-drop-input -n veil-tell-baseline-candidate -D pr76-baseline
+gh run download 43687817268 -R mt4110/image-drop-input -n veil-tell-pr-report -D pr76-normal
+gh run download 43687870837 -R mt4110/image-drop-input -n veil-tell-pr-report -D pr76-control
+
+jq '[.destinations[] | {host, port}]' pr76-baseline/npm.json
+jq '{isolation, run_status}' pr76-baseline/report.json
+jq '{
+  coverage, child_status, run_status,
+  marked_update: [.comparison.lockfile_changes.updated[] |
+    select(.before.name == "marked") | {from: .before.version, to: .after.version}],
+  added: .comparison.added,
+  blocked: [.destinations[] | select(.result == "blocked") |
+    {host, port, decision, result, sent_bytes, received_bytes}]
+}' pr76-normal/report.json pr76-control/report.json
+```
