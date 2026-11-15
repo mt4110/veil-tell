@@ -45,12 +45,18 @@ fn credential() -> Result<String> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random))
 }
 
+fn shorthand_ci(options: &Options) -> bool {
+    options.shorthand
+        && std::env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
+}
+
 async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let shorthand = options.shorthand;
     if shorthand {
-        options.comparison.automatic =
-            options.save_baseline || manager::install_key(&options.command).is_some();
+        let install = manager::install_key(&options.command).is_some();
+        options.comparison.ci = shorthand_ci(&options) && install && !options.save_baseline;
+        options.comparison.automatic = !options.comparison.ci && (options.save_baseline || install);
     }
     options.comparison.no_attribute = options.no_attribute;
     let state = cwd.join(".veil-tell");
@@ -66,6 +72,11 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u
         match isolation::probe(&cwd).await {
             Ok(()) => options.backend = Backend::Isolated,
             Err(reason) => {
+                if shorthand_ci(&options) {
+                    return Err(error(format!(
+                        "CI requires isolation / CI には隔離が必要です: {reason}"
+                    )));
+                }
                 let setup = if cfg!(target_os = "linux") {
                     "sudo apt-get install bubblewrap (Ubuntu; requires unprivileged namespaces)"
                 } else {
@@ -331,7 +342,7 @@ async fn run_command(
     let attempted: Option<Vec<_>> = proxy
         .dns_attempts
         .as_ref()
-        .map(|records| records.lock().unwrap().values().cloned().collect());
+        .map(|records| records.lock().unwrap().names.values().cloned().collect());
     let dns = attempted.as_deref().unwrap_or_default();
     let volume_anomalies = volume::anomalies(&destinations, &proxy.budgets);
     let volume_blocked = volume_anomalies.iter().any(|item| item.blocked);
@@ -440,11 +451,6 @@ async fn run_command(
             );
         }
     }
-    if attempted.is_some() && dns.is_empty() {
-        eprintln!(
-            "veil-tell: No Node.js DNS attempts recorded / Node.js の名前解決の試みは記録されませんでした"
-        );
-    }
     let compare_volume_denial = reason == "volume_limit_exceeded" && options.comparison.ci;
     let comparison = if let Some(session) = comparison {
         let ci_denial = (options.comparison.ci || options.comparison.fail_on_new)
@@ -476,6 +482,26 @@ async fn run_command(
     } else {
         None
     };
+    if exit_code == 0
+        && options.mode == Mode::Observe
+        && !options.comparison.ci
+        && options.comparison.input.is_some()
+        && !volume_anomalies.is_empty()
+    {
+        (exit_code, reason) = (volume::OBSERVED_ANOMALY, "volume_anomaly");
+    }
+    if shorthand_ci(&options)
+        && !options.save_baseline
+        && comparison.is_none()
+        && !dns.is_empty()
+        && matches!(reason, "completed" | "child_failed")
+        && status.is_some_and(|status| status.code().is_some())
+    {
+        (exit_code, reason) = (baseline::NEW_DESTINATION, "new_destination");
+    }
+    if reason == "incomplete_capture" {
+        eprintln!("veil-tell: capture limit exceeded / 記録しきれませんでした");
+    }
     eprintln!(
         "veil-tell: {reason} (exit {exit_code}). Recorded HTTP CONNECT requests: {connect_requests}. Direct sockets are outside the capture scope."
     );
@@ -512,6 +538,24 @@ async fn run_command(
     if let Some(file) = report {
         file.save_report(&result)?;
     }
+    let install_hint = match (result.run_status.reason, executable) {
+        ("child_failed", Some("pnpm"))
+            if cfg!(target_os = "macos")
+                && options.backend == Backend::Isolated
+                && result
+                    .destinations
+                    .iter()
+                    .any(|destination| destination.result == "completed") =>
+        {
+            Some(
+                "if pnpm 12.4.x cannot verify TLS in the sandbox, update to pnpm 12.21.0 or later / pnpm 12.4.x の隔離内 TLS 検証失敗なら pnpm 12.21.0 以降に更新",
+            )
+        }
+        ("child_failed", Some("pnpm" | "yarn" | "bun")) => Some(
+            "check that the pinned package manager and Node.js are visible inside isolation, then check the project cache and registry URL / 固定したツールが隔離内で見えるか確認し、キャッシュとレジストリ URL を点検",
+        ),
+        _ => None,
+    };
     if let Some(diff) = &result.comparison {
         if diff.created() && attribute_cargo {
             for destination in &result.destinations {
@@ -533,17 +577,16 @@ async fn run_command(
         diff.display(
             options.comparison.automatic,
             !result.volume_anomalies.is_empty(),
+            install_hint,
         );
     } else if volume_blocked {
         eprintln!("Next / 次: review volume_anomalies / レポートの送信量と上限を確認");
-    } else if result.run_status.exit_code != 0
-        && matches!(executable, Some("pnpm" | "yarn" | "bun"))
-    {
-        eprintln!(
-            "Next / 次: check the runtime, project cache and registry proxy settings / 実行環境・プロジェクト内キャッシュ・レジストリのプロキシ設定を確認"
-        );
+    } else if let Some(hint) = install_hint {
+        eprintln!("Next / 次: {hint}");
     } else if options.shorthand {
-        let next = if result.run_status.exit_code == 0 {
+        let next = if result.run_status.reason == "new_destination" {
+            "review the observed destination before continuing / 記録された宛先を確認"
+        } else if result.run_status.exit_code == 0 {
             "veil-tell --save-baseline COMMAND"
         } else {
             "fix the command error above and repeat / 上のエラーを直して再実行"

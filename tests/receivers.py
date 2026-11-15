@@ -234,6 +234,11 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
             cargo_destination_diff(cli, project, evidence)
 
 
+def action_summary(report):
+    renderer = SCRIPT.parent.parent / ".github" / "destination-summary.py"
+    return subprocess.check_output([sys.executable, renderer, report], text=True)
+
+
 def volume_test(fixture, project, evidence, node_root):
     policy = evidence / "volume.toml"
     policy.write_text('version = 1\nprofile = "volume"\n[[rule]]\n'
@@ -247,7 +252,8 @@ def volume_test(fixture, project, evidence, node_root):
         env = dict(os.environ, VEIL_TELL_FIXTURE_RECEIVER=address)
         cases = [
             ("train", ["observe", "--baseline-out", baseline], 4096, 4096, 0),
-            ("observe", ["observe", "--baseline", baseline], 524288, 524288, 0),
+            ("observe", ["observe", "--baseline", baseline], 524288, 524288, 21),
+            ("no-baseline", ["observe"], 524288, 524288, 0),
             ("restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
             ("ci", ["ci", "--baseline", baseline], 524288, 131072, 22),
         ]
@@ -260,11 +266,13 @@ def volume_test(fixture, project, evidence, node_root):
                 runtime = demo / "runtime"
             env["PATH"] = f"{runtime / 'bin'}:{env['PATH']}"
             shutil.copyfile(SCRIPT, demo / "probe.py")
-            (demo / "package.json").write_text(json.dumps({
-                "name": "veil-volume-fixture", "version": "1.2.3", "private": True,
-                "scripts": {"postinstall": f"{sys.executable} -B probe.py volume 524288"},
-            }))
-            cases.append(("postinstall", ["ci", "--baseline", baseline], 524288, 131072, 22))
+            install_baseline = evidence / "install-volume-baseline.json"
+            cases.extend([
+                ("install-train", ["observe", "--baseline-out", install_baseline], 4096, 4096, 0),
+                ("install-observe", ["observe", "--baseline", install_baseline], 524288, 524288, 21),
+                ("install-ci", ["ci", "--baseline", install_baseline], 524288, 131072, 22),
+                ("install-restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
+            ])
 
         for name, arguments, sent, expected, code in cases:
             received = []
@@ -283,12 +291,19 @@ def volume_test(fixture, project, evidence, node_root):
             thread.start()
             report = evidence / f"volume-{name}.json"
             try:
-                command = (["npm", "--no-update-notifier", "run", "postinstall"] if name == "postinstall"
-                           else [sys.executable, "-B", "probe.py", "volume", str(sent)])
+                install = name.startswith("install-")
+                if install:
+                    (demo / "package.json").write_text(json.dumps({
+                        "name": "veil-volume-fixture", "version": "1.2.3", "private": True,
+                        "scripts": {"postinstall": f"{sys.executable} -B probe.py volume {sent}"},
+                    }))
+                    command = ["npm", "install", "--no-audit", "--no-fund", "--no-update-notifier"]
+                else:
+                    command = [sys.executable, "-B", "probe.py", "volume", str(sent)]
                 child = subprocess.run(
                     [fixture, *arguments, *([] if arguments[0] == "ci" else ["--backend", "isolated"]),
                      "--report", report, "--", *command],
-                    cwd=demo if name == "postinstall" else project,
+                    cwd=demo if install else project,
                     env=env, capture_output=True, text=True, timeout=12,
                 )
             finally:
@@ -297,14 +312,23 @@ def volume_test(fixture, project, evidence, node_root):
             result = json.loads(report.read_text())
             assert result["child_status"]["exit_code"] == 0, (child.stdout, child.stderr, result)
             assert result["destinations"][0]["sent_bytes"] == expected
-            if name != "train":
+            if code:
                 anomaly, = result["volume_anomalies"]
                 assert anomaly["blocked"] == (code == 22), result
-                if name == "postinstall":
+                assert result["run_status"]["reason"] == (
+                    "volume_limit_exceeded" if code == 22 else "volume_anomaly"
+                ), result
+                if install:
                     source, = anomaly["attribution"]
                     assert source["package"]["name"] == "veil-volume-fixture"
                     assert source["package"]["script"] == "postinstall"
                 print(next(line for line in child.stderr.splitlines() if "volume anomaly" in line))
+            else:
+                assert not result.get("volume_anomalies"), result
+            if name == "install-ci":
+                summary = action_summary(report)
+                assert "<code>Volume anomaly</code>" in summary and "bytes 131072/262144" in summary
+                assert "veil-volume-fixture@1.2.3" in summary and "切断" in summary
             print(f"receiver case=volume-{name} os={sys.platform} bytes={expected} child=0 exit={code}")
 
 
@@ -344,7 +368,22 @@ def dns_attempt_test(cli, project, evidence, runtime):
         "name": "veil-dns-fixture", "version": "1.2.3", "script": "postinstall", "path": ".",
     }}], child.stderr
     print(next(line for line in child.stderr.splitlines() if "attempted (blocked)" in line))
+    summary = action_summary(report)
+    assert "<code>Attempted DNS</code>" in summary and "veil-dns-fixture@1.2.3" in summary
     print(f"receiver case=node-dns os={sys.platform} connect=0 child=0 exit=21")
+
+    for ci, expected in (("false", 0), ("true", 21)):
+        child = subprocess.run(
+            [cli, "--json", "node", "probe.cjs"], cwd=demo, env=dict(env, CI=ci),
+            capture_output=True, text=True, timeout=10,
+        )
+        data = json.loads(child.stdout)
+        assert child.returncode == expected and data["child_status"]["exit_code"] == 0, child.stderr
+        assert [record["host"] for record in data["attempted"]] == ["postinstall.invalid"]
+    quiet = subprocess.run([cli, "--json", "/usr/bin/true"], cwd=demo, env=env,
+                           capture_output=True, text=True, timeout=10)
+    data = json.loads(quiet.stdout)
+    assert data["attempted"] == [] and "DNS attempts recorded" not in quiet.stderr
 
     flood = evidence / "dns-overflow.json"
     child = subprocess.run(
@@ -385,6 +424,9 @@ def npm_destination_diff(cli, project, evidence, runtime):
         assert not (demo / ".veil-tell/pending.json").exists()
     linked = invoke([cli, "ci", "--", "npm", "ci", *args[2:]])
     assert linked.returncode == 0 and "No new destinations" in linked.stderr, linked.stderr
+    clean_report = evidence / "npm-unchanged-summary.json"
+    unchanged = invoke([cli, "ci", "--report", clean_report, "--", "npm", "ci", *args[2:]])
+    assert unchanged.returncode == 0 and len(action_summary(clean_report).splitlines()) == 1
     assert json.loads((demo / ".veil-tell/npm.json").read_text())["backend"] == "isolated"
     print(f"fixture os={sys.platform} install_to_ci=0 offline_repeats=5 approvals=0")
     manifest = demo / "package.json"
@@ -399,6 +441,7 @@ def npm_destination_diff(cli, project, evidence, runtime):
     print(result.stdout, end="")
     print(result.stderr, end="")
     assert result.returncode == 21, (result.stdout, result.stderr)
+    assert "<code>CONNECT</code>" in action_summary(report)
     data = json.loads(report.read_text())
     assert data["child_status"]["exit_code"] == 0
     assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
@@ -779,6 +822,7 @@ def npm_test(fixture, runtime, project, evidence, policy, ip):
 
 
 if __name__ == "__main__":
+    os.environ.pop("CI", None)
     if sys.argv[1] == "probe":
         probe(*sys.argv[2:])
     elif sys.argv[1] == "invalid-proxy-auth":

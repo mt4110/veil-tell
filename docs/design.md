@@ -397,3 +397,19 @@ pip を対象にするなら、PEP 517 のビルドバックエンド用プロ�
 - 最初の実験の後、自分の次の依存更新でもジョブを残して使った人の数と、実際に判断に使った箇所を記録する。レジストリやキャッシュの差による誤報も確認する。試した人数、継続した人数、外した理由を残す。収集は参加者からの報告で行い、ツールに計測用の外部送信は追加しない。
 
 導入に詰まった箇所が共通なら、その箇所に絞って直す。実行に成功しても次の更新で使われなければ、理由を聞いて対象や価値の仮説を見直す。
+
+## 次版 0.5.0 の設計判断
+
+0.4.1 ではなく 0.5.0 とする。既存の隔離方式に加え、短い CI 実行と明示的な観測比較の終了判定を利用者から見える形で拡張するため。JSON は v1 を維持する。`20` は restrict の未登録 CONNECT、`21` は比較で検出した新規宛先・観測した DNS 試行と、明示的な観測比較の送信量異常、`22` は上限による遮断、`125` は検査不能・記録不完全に使う。観測だけの `21` と切断の `22` は `run_status.reason` と `volume_anomalies[].blocked` で区別する。
+
+### 採用した範囲と見送った案
+
+- pnpm 12.4.2 の証明書検証の失敗には上流修正を含む 12.21.0 を案内する。TLS の無効化、`trustd` の許可、veil-tell からパッケージマネージャーを勝手に置き換える案は見送った。[上流修正](https://github.com/pnpm/pnpm/pull/15358)
+- Linux の非転送 DNS は非特権ポートの模擬試験まで。Ubuntu の既存設定では標準ポート53を開けなかった。macOS の拒否ログは問い合わせ名を持たず、重複が集約される。ランタイム個別の追加フックとログ件数を根拠にした CI 判定は採用しない。[DNS の実測](dns-attempts.md#次版の実測と判定)
+- 送受信比だけの警告は見送った。正常な公開やアップロードにも同じ比率が出るので、基準ありの比較と明示された制限を使う。[しきい値と受信側の実測](volume-limits.md#インストールを基準にした受信側の比較)
+
+### 先行例との重なり
+
+- StepSecurity Harden-Runner は CI の宛先を監査・制限し、実行履歴の基準で新規宛先を検出する。Anthropic Sandbox Runtime は OS 隔離・プロキシの許可リスト・違反記録を持ち、macOS では `trustd` を許す場合の持ち出しリスクも明記する。veil-tell のこの版では、コマンド単位で Git 管理する基準と、推定帰属付きの比較結果に焦点を置く。[Harden-Runner](https://www.stepsecurity.io/blog/railway-security-incident-ci-cd-runtime-security) · [Sandbox Runtime](https://github.com/anthropics/sandbox-runtime)
+- Socket は依存更新 PR にパッケージのリスク情報を出す。OpenSnitch、LuLu、Little Snitch は端末上のアプリの接続を扱う。veil-tell の記録は起動したコマンドの実測に依存し、ホスト全体の監視を行わない。[Socket for GitHub](https://docs.socket.dev/docs/socket-for-github) · [OpenSnitch](https://github.com/evilsocket/opensnitch) · [LuLu](https://objective-see.org/products/lulu.html) · [Little Snitch](https://obdev.at/products/littlesnitch/index.html)
+- 転送せず NXDOMAIN を返す構成は CoreDNS の `template` と `log` でも組める。今回の論点はリゾルバの新規性より、既存の非特権隔離内に受付を置けるかどうか。Zeek の `conn.log` は方向別バイト数を記録する。veil-tell の比較対象は個々の許可済み CONNECT の暗号化トンネルで、基準または TOML の上限でそのトンネルを打ち切る。[CoreDNS template](https://coredns.io/plugins/template/) · [CoreDNS log](https://coredns.io/plugins/log/) · [Zeek conn.log](https://docs.zeek.org/en/current/logs/conn.html)

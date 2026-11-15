@@ -12,7 +12,7 @@ function lifecycle() {
   const root = process.env.VEIL_TELL_NODE_ROOT;
   const event = process.env.npm_lifecycle_event;
   const claimed = process.env.npm_package_json;
-  if (!root || (!claimed && process.env.VEIL_TELL_NODE_MANAGER !== 'yarn') || !/^[a-z0-9_.:-]{1,64}$/i.test(event || '')) return;
+  if (!root || (!claimed && !['pnpm', 'yarn'].includes(process.env.VEIL_TELL_NODE_MANAGER)) || !/^[a-z0-9_.:-]{1,64}$/i.test(event || '')) return;
   let fd;
   try {
     const cwd = fs.realpathSync(process.cwd());

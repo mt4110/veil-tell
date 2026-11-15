@@ -294,7 +294,7 @@ impl Comparison {
         !self.added.is_empty() || !self.attempted_added.is_empty()
     }
 
-    pub fn display(&self, automatic: bool, volume_anomaly: bool) {
+    pub fn display(&self, automatic: bool, volume_anomaly: bool, failure_hint: Option<&str>) {
         let message = match self.status {
             "new_destinations_only" => {
                 "New destinations before command failure / コマンド失敗までに観測した新規宛先"
@@ -357,7 +357,9 @@ impl Comparison {
                 e.host, e.port
             );
         }
-        let next = if self.created() && automatic {
+        let next = if let Some(hint) = failure_hint {
+            hint
+        } else if self.created() && automatic {
             "commit the baseline: git add .veil-tell / 基準をコミット: git add .veil-tell"
         } else if automatic && self.has_new() {
             "review, then veil-tell accept / 調査後、承認するなら veil-tell accept"

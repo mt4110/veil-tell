@@ -5,6 +5,8 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 
+// Comparing a completed observation against an explicit baseline is a change check.
+pub const OBSERVED_ANOMALY: u8 = 21;
 pub const LIMIT_EXCEEDED: u8 = 22;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
