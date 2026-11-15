@@ -234,6 +234,11 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
             cargo_destination_diff(cli, project, evidence)
 
 
+def action_summary(report):
+    renderer = SCRIPT.parent.parent / ".github" / "destination-summary.py"
+    return subprocess.check_output([sys.executable, renderer, report], text=True)
+
+
 def volume_test(fixture, project, evidence, node_root):
     policy = evidence / "volume.toml"
     policy.write_text('version = 1\nprofile = "volume"\n[[rule]]\n'
@@ -320,6 +325,10 @@ def volume_test(fixture, project, evidence, node_root):
                 print(next(line for line in child.stderr.splitlines() if "volume anomaly" in line))
             else:
                 assert not result.get("volume_anomalies"), result
+            if name == "install-ci":
+                summary = action_summary(report)
+                assert "<code>Volume anomaly</code>" in summary and "bytes 131072/262144" in summary
+                assert "veil-volume-fixture@1.2.3" in summary and "切断" in summary
             print(f"receiver case=volume-{name} os={sys.platform} bytes={expected} child=0 exit={code}")
 
 
@@ -359,6 +368,8 @@ def dns_attempt_test(cli, project, evidence, runtime):
         "name": "veil-dns-fixture", "version": "1.2.3", "script": "postinstall", "path": ".",
     }}], child.stderr
     print(next(line for line in child.stderr.splitlines() if "attempted (blocked)" in line))
+    summary = action_summary(report)
+    assert "<code>Attempted DNS</code>" in summary and "veil-dns-fixture@1.2.3" in summary
     print(f"receiver case=node-dns os={sys.platform} connect=0 child=0 exit=21")
 
     for ci, expected in (("false", 0), ("true", 21)):
@@ -413,6 +424,9 @@ def npm_destination_diff(cli, project, evidence, runtime):
         assert not (demo / ".veil-tell/pending.json").exists()
     linked = invoke([cli, "ci", "--", "npm", "ci", *args[2:]])
     assert linked.returncode == 0 and "No new destinations" in linked.stderr, linked.stderr
+    clean_report = evidence / "npm-unchanged-summary.json"
+    unchanged = invoke([cli, "ci", "--report", clean_report, "--", "npm", "ci", *args[2:]])
+    assert unchanged.returncode == 0 and len(action_summary(clean_report).splitlines()) == 1
     assert json.loads((demo / ".veil-tell/npm.json").read_text())["backend"] == "isolated"
     print(f"fixture os={sys.platform} install_to_ci=0 offline_repeats=5 approvals=0")
     manifest = demo / "package.json"
@@ -427,6 +441,7 @@ def npm_destination_diff(cli, project, evidence, runtime):
     print(result.stdout, end="")
     print(result.stderr, end="")
     assert result.returncode == 21, (result.stdout, result.stderr)
+    assert "<code>CONNECT</code>" in action_summary(report)
     data = json.loads(report.read_text())
     assert data["child_status"]["exit_code"] == 0
     assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}

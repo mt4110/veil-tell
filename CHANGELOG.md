@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (unreleased)
+
+- Guide macOS users of pnpm 12.4.x toward a tested version with upstream sandbox-safe TLS verification. Exercise npm, three pnpm majors, both Yarn variants, and Bun.
+- Enforce recorded new lookup attempts in shorthand CI, omit empty human-facing DNS notices, and fail incomplete DNS capture at its recording limits.
+- Return 21 for outbound volume anomalies in explicit baseline observation. Preserve 22 when an enforced limit cuts a tunnel.
+- Show CONNECT, DNS and volume findings in one Action summary, including inferred attribution, lockfile evidence, and observed counts against limits.
+
 ## 0.4.0
 
 - Compare dependency installs with a stable, project-level baseline. Missing destinations are informational.

@@ -86,6 +86,16 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 - **隔離モードは OS 側で直接通信を制限します。** JSON v1 の `coverage.proxy = "http_connect_requests"` と `coverage.direct_attempt_destinations = "not_observed"` は両モードに共通です。OS が拒否した直接通信や IPC の詳細は JSON に記録されません。
 - **許可したホスト経由の持ち出しは残ります。** 送信量を比較でき、CI または明示的な制限では上限超過でトンネルを閉じます。上限までのデータは届き得ます。 [送信量のしきい値と範囲](docs/volume-limits.md) たとえば、子プロセスが使える認証情報や公開アップロード機能を通じて、許可済みの GitHub や npm レジストリへ秘密情報を送れる場合があります。プロキシは TLS を終端せず、HTTP メソッド、URL パス、本文は観測・制御の範囲外です。ホストの許可は、そのホストへのトンネルを許可します。
 
+| 隔離中の観測 | Linux | macOS |
+| --- | --- | --- |
+| プロキシに届く HTTP CONNECT | ホスト名とポート | ホスト名とポート |
+| 対応する Node.js の名前解決 | ホスト名を記録して拒否 | ホスト名を記録して拒否 |
+| curl・Python・Go の標準リゾルバ、IP 直打ち | 直接通信の試行先・件数は未観測 | 直接通信の試行先・件数は未観測 |
+
+`CI=true veil-tell npm install` は隔離と既存の基準を使い、新規 CONNECT や観測できた新規名前解決の試行で `21` を返します。ローカルの短い形式は観測した試行だけを理由に失敗させません。明示的な `observe --baseline FILE` は送信量の異常を記録して `21` を返し、制限による切断は `22` を返します。少量ずつの送信や実行をまたぐ累計は比較範囲外です。
+
+macOS の隔離で pnpm 12.4.x の TLS 検証エラーが出る場合は、実測で通った pnpm 12.21.0 以降を使ってください。[原因と実測](docs/destination-diff.md#pnpm-12-の-macos-tls-とバージョン別の回帰試験)
+
 LuLu・Little Snitch・OpenSnitch のホスト側制御、Firejail のプロセス隔離、mitmproxy の通信調査と用途が重なります。veil-tell では、起動したコマンドを単位として観測し、レビューしたポリシーをローカルと CI で使えます。 [先行例との比較](docs/design.md#8-先行例との関係)
 
 ## 隔離の動作条件

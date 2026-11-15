@@ -11,6 +11,36 @@ def cell(value):
     return "<code>" + " ".join(text.splitlines()) + "</code>"
 
 
+def volume_details(endpoint):
+    if "observed" not in endpoint:
+        return "—"
+    observed, limits = endpoint["observed"], endpoint["limits"]
+    details = ", ".join(
+        f"{label} {observed[key]}/{limits[key]}"
+        for key, label in (
+            ("sent_bytes", "bytes"), ("connections", "connections"),
+            ("max_connection_bytes", "max bytes per connection"),
+        )
+    )
+    return ("cut / 切断 · " if endpoint["blocked"] else "observed / 観測 · ") + details
+
+
+def matching_lock_change(changes, package):
+    if not package:
+        return "—"
+    identity = package["name"], package["version"]
+    for entry in changes.get("updated", []):
+        before, after = entry["before"], entry["after"]
+        if (after["name"], after["version"]) == identity:
+            if before["version"] == after["version"]:
+                return f'{after["version"]} integrity changed / integrity 変更'
+            return f'{before["version"]}→{after["version"]}'
+    for added in changes.get("added", []):
+        if (added["name"], added["version"]) == identity:
+            return "added / 追加"
+    return "—"
+
+
 def summary(report):
     comparison = report.get("comparison") or {}
     findings = (
@@ -29,8 +59,9 @@ def summary(report):
         (item["host"], item["port"], json.dumps(item["source"], sort_keys=True)): item["label"]
         for item in comparison.get("lockfile_evidence", [])
     }
-    print("| Kind | Destination | Package | Lifecycle | Path | Attribution |")
-    print("| --- | --- | --- | --- | --- | --- |")
+    changes = comparison.get("lockfile_changes") or {}
+    print("| Kind | Destination | Package | Lifecycle | Path | Attribution | Lockfile | Observed / Limit |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- |")
     rows = 0
     for kind, endpoint in findings:
         for source in endpoint.get("attribution") or [{"confidence": "unknown"}]:
@@ -43,9 +74,10 @@ def summary(report):
                 kind, f"{host}:{port}" if port else host,
                 f'{package["name"]}@{package["version"]}' if package else "—",
                 package.get("script", "—"), package.get("path", "—"),
-                " · ".join(filter(None, (source["confidence"], evidence.get((
-                    host, port, json.dumps(source, sort_keys=True)
-                ))))),
+                source["confidence"],
+                evidence.get((host, port, json.dumps(source, sort_keys=True)))
+                or matching_lock_change(changes, package),
+                volume_details(endpoint),
             )
             print("| " + " | ".join(map(cell, values)) + " |")
             rows += 1

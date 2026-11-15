@@ -86,6 +86,16 @@ Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. 
 - **The isolated backend restricts direct connections at the OS level.** Both modes report `coverage.proxy = "http_connect_requests"` and `coverage.direct_attempt_destinations = "not_observed"` in JSON v1. The report omits details of OS-denied direct connections and IPC.
 - **Data can still leave through an allowed host.** CI and explicitly configured limits can close a tunnel when outbound volume exceeds its budget. Bytes within the limit can still reach the receiver. [Volume limits and scope](docs/volume-limits.md) For example, a child process may be able to send secrets to an allowed GitHub host or npm registry using credentials it can access or public upload features. The proxy tunnels TLS. HTTP methods, URL paths, and request bodies are outside its capture and control scope. An allow rule permits a tunnel to the host.
 
+| Capture under isolation | Linux | macOS |
+| --- | --- | --- |
+| HTTP CONNECT reaching the proxy | Hostname and port | Hostname and port |
+| Supported Node.js lookups | Recorded by hostname and denied | Recorded by hostname and denied |
+| Native curl, Python and Go resolvers, or literal IPs | Direct destinations and counts are unobserved | Direct destinations and counts are unobserved |
+
+`CI=true veil-tell npm install` requires isolation and an existing baseline, and returns `21` for new CONNECT destinations or newly observed lookup attempts. Local shorthand does not fail solely on recorded lookup attempts. Explicit `observe --baseline FILE` reports an outbound volume anomaly with exit `21`; an enforced tunnel cutoff still uses `22`. Small transfers below the threshold and totals spanning several runs are outside volume comparison.
+
+If pnpm 12.4.x fails TLS verification in macOS isolation, use the tested pnpm 12.21.0 or a later version. [Cause and measurements (Japanese)](docs/destination-diff.md#pnpm-12-の-macos-tls-とバージョン別の回帰試験)
+
 veil-tell overlaps with host-level controls in LuLu, Little Snitch, and OpenSnitch, process isolation in Firejail, and traffic inspection in mitmproxy. Its unit of observation is the command it launches, and a reviewed policy can be used locally and in CI. [Comparison with related tools](docs/design.md#8-先行例との関係)
 
 ## Isolation requirements

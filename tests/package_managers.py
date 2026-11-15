@@ -77,7 +77,14 @@ def test_manager(cli, tool, manager):
         recorded = json.loads(baseline.read_text())
         assert recorded["backend"] == "isolated"
         assert recorded["lockfile"]["ecosystem"] == manager, recorded
-        for _ in range(5):
+        for i in range(10):
+            if i >= 5:
+                hold = root / f"cold-cache-{i}"
+                hold.mkdir()
+                for relative in ("node_modules", ".pnpm-store", ".yarn", ".pnp.cjs", ".pnp.loader.mjs"):
+                    cache = project / relative
+                    if cache.exists():
+                        cache.rename(hold / relative)
             stable, _ = run([cli, *command])
             assert stable.returncode == 0 and "veil-tell accept" not in stable.stderr, stable.stderr
             assert "volume anomaly" not in stable.stderr, stable.stderr
@@ -86,7 +93,11 @@ def test_manager(cli, tool, manager):
         comparison = json.loads(stable_ci.stdout)["comparison"]
         assert stable_ci.returncode == 0 and comparison["status"] == "compared", stable_ci
         assert "lockfile_changes" in comparison, comparison
-        print(f"{sys.platform} {manager} {version} stable=5 ci=0 control={elapsed:.3f}s isolated={isolated:.3f}s", flush=True)
+        short_ci = subprocess.run([cli, "--json", *command], cwd=project, env=dict(env, CI="true"),
+                                  text=True, capture_output=True, timeout=30)
+        assert short_ci.returncode == 0, short_ci.stderr
+        assert json.loads(short_ci.stdout)["comparison"]["status"] == "compared"
+        print(f"{sys.platform} {manager} {version} warm=5 cold=5 ci=0 control={elapsed:.3f}s isolated={isolated:.3f}s", flush=True)
 
         dep = project / "dep"
         dep.mkdir()

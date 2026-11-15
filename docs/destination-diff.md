@@ -167,3 +167,29 @@ macOS 27.2、pnpm 12.4.2、公開版 veil-tell 0.4.0 で、`is-number@7.0.0` を
 | 12.21.0 | 0.096 → 0.146 | 0.040 → 0.084 |
 
 両 OS で npm 11.20.0、上表の pnpm、Yarn Berry 4.18.1・Classic 1.22.22、Bun 1.4.4 を確認した。初回の隔離インストールでパッケージマネージャー別の基準を作成し、ロックファイル要約を読み取れた。5回の反復に承認待ち・送信量警告はなく、続く CI は 0。依存を差し替えた対照の Node.js `postinstall` は 21 で、npm・pnpm・両 Yarn では `probe@1.2.3 postinstall` と推定帰属した。Bun は名前解決の記録は残るが帰属は unknown。fixture のファイル依存を、公開パッケージの integrity が照合できる例としては扱わない。
+
+### 0.5.0 の記事用デモ
+
+`tests/package_managers.py` の pnpm 12.21.0 ケースはローカルの `file:` 依存を2版用意し、通常の反復、次いで `postinstall` からの新しい名前解決を試す。ソースをビルドして、実行ファイルの名前が `pnpm` になるように置いて実行する。
+
+```sh
+cargo build --locked --bins --examples
+python3 -B tests/package_managers.py target/debug/veil-tell "pnpm=/path/to/pnpm"
+```
+
+macOS と Ubuntu では、ともに通常の隔離インストールから作った基準を、キャッシュあり・なしの各5回で再利用できた。承認待ちと送信量の警告は0件。対照では両 OS で次の行が出て、子は0、veil-tell は21になった。送信先は予約済みの `.invalid` 名で、Node.js のフックが名前解決を拒否した。
+
+```text
+veil-tell: attempted (blocked) / 名前解決を拒否: new-package.invalid ← probe@1.2.3 postinstall (node_modules/.pnpm/probe@file+dep/node_modules/probe) [inferred / 推定]
+```
+
+送信量の対照は `tests/receivers.py` で実行する。[受信側の手順](runbook.md#3-ローカル受信側の回帰試験)。両 OS の同じ fixture で、許可済み宛先に送ろうとした 524,288 バイトが、CI では 131,072 バイトで止まり、JSON と受信側が一致した。
+
+```text
+receiver case=volume-install-ci os=darwin bytes=131072 child=0 exit=22
+receiver case=volume-install-ci os=linux bytes=131072 child=0 exit=22
+```
+
+### Action の検証範囲
+
+[公開済み v0.4.0 の macOS 実行](https://github.com/mt4110/veil-tell/actions/runs/43459261848) と [Ubuntu 実行](https://github.com/mt4110/veil-tell/actions/runs/43410515308) は、公開タグの `uses: mt4110/veil-tell@v0` の証拠。0.5.0 の要約レンダラーは両 OS の受信テストが生成する JSON で確認した。変更したブランチは未 push で、公開タグの Action は引き続き 0.4.0 を取得する。0.5.0 の hosted runner 実測は、配布物と来歴が利用可能になってから記録する。

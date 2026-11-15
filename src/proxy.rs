@@ -569,6 +569,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dns_records_are_bounded_by_distinct_names_and_total_attempts() {
+        let mut records = DnsAttempts::default();
+        for id in 0..MAX_DNS_NAMES {
+            assert!(records.record(format!("fixture{id}.test"), None));
+        }
+        assert!(!records.record("overflow.test".into(), None));
+        for _ in MAX_DNS_NAMES as u64..MAX_DNS_ATTEMPTS {
+            assert!(records.record("fixture0.test".into(), None));
+        }
+        assert!(!records.record("fixture0.test".into(), None));
+        assert_eq!(records.names.len(), MAX_DNS_NAMES);
+        assert_eq!(
+            records
+                .names
+                .values()
+                .map(|attempt| attempt.attempts)
+                .sum::<u64>(),
+            MAX_DNS_ATTEMPTS
+        );
+    }
+
+    #[test]
     fn tunnel_requires_session_auth_and_a_strict_authority() {
         let valid = b"CONNECT Allowed.test.:443 HTTP/1.1\r\nProxy-Authorization: Basic token\r\n\r\npayload";
         let Head::Accept { host, consumed, .. } = parse(valid, "Basic token", false, false) else {
