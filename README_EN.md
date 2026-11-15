@@ -10,28 +10,7 @@ veil-tell npm install
 veil-tell ci -- npm ci
 ```
 
-This workflow also runs on Dependabot and Renovate PRs. Review and commit `.veil-tell/npm.json` first.
-
-```yaml
-name: Check npm destinations
-on: pull_request
-permissions:
-  contents: read
-jobs:
-  destinations:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - run: |
-          if ! test -x /usr/bin/bwrap; then
-            sudo apt-get update
-            sudo apt-get install -y bubblewrap
-          fi
-      - uses: mt4110/veil-tell@v0
-```
+To check dependency updates in GitHub Actions, copy the [npm workflow template](examples/github-actions/veil-tell-npm.yml) to `.github/workflows/veil-tell-npm.yml` in your repository. Run **Check npm destinations** manually on the default branch, review the artifact's `npm.json`, and commit it as `.veil-tell/npm.json`. On the next dependency PR, the workflow checks `npm ci` against the PR base baseline. You can set this up on GitHub without installing veil-tell locally. [Setup guide (Japanese)](docs/runbook.md#10-npm-の依存更新-pr-に導入する)
 
 ### GitHub Actions results for v0.4.0
 
