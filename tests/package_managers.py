@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -42,15 +43,30 @@ def test_pnpm_store(cli, tool, workspace, env, version):
         assert child.returncode == expected, (args, child.stdout, child.stderr)
         return child
 
+    def snapshot_modules(root):
+        entries = {}
+        for path in (root, *root.rglob("*")):
+            metadata = path.lstat()
+            contents = None
+            if stat.S_ISLNK(metadata.st_mode):
+                contents = os.readlink(path)
+            elif stat.S_ISREG(metadata.st_mode):
+                contents = path.read_bytes()
+            entries[path.relative_to(root)] = (metadata.st_mode, metadata.st_mtime_ns, contents)
+        return entries
+
     guarded = invoke(cli, tool, "install", "--offline", expected=125)
     assert "storeDir: .pnpm-store" in guarded.stderr, guarded.stderr
-    modules = project / "node_modules" / ".modules.yaml"
-    assert not modules.exists()
+    modules_dir = project / "node_modules"
+    assert not modules_dir.exists()
     # The guard also preserves a dependency tree previously installed by plain pnpm.
     invoke(tool, "install", "--offline")
-    native_modules = modules.read_bytes()
-    invoke(cli, tool, "install", "--offline", expected=125)
-    assert modules.read_bytes() == native_modules
+    modules = modules_dir / ".modules.yaml"
+    assert modules.is_file()
+    native_modules = snapshot_modules(modules_dir)
+    guarded = invoke(cli, tool, "install", "--offline", expected=125)
+    assert "storeDir: .pnpm-store" in guarded.stderr, guarded.stderr
+    assert snapshot_modules(modules_dir) == native_modules
 
     config = project / "pnpm-workspace.yaml"
     install_settings = "packages: ['.']\nstoreDir: .pnpm-store\n"
@@ -60,7 +76,7 @@ def test_pnpm_store(cli, tool, workspace, env, version):
         assert "pnpm store path" in wrong_store.stderr, wrong_store.stderr
         (project / ".npmrc").write_text("store-dir=.pnpm-store\n")
     # Keep the original tree for the test. The next install starts empty.
-    modules.parent.rename(project / "native-modules")
+    modules_dir.rename(project / "native-modules")
     override = invoke(cli, tool, "--store-dir", ".other-store", "install", "--offline", expected=125)
     assert "workspace configured in the current directory" in override.stderr, override.stderr
     assert not modules.exists()
@@ -77,7 +93,11 @@ def test_pnpm_store(cli, tool, workspace, env, version):
     report = invoke(cli, "--json", tool, "install", "--offline")
     assert json.loads(report.stdout)["run_status"]["exit_code"] == 0
     assert str(store) in modules.read_text() and config.read_bytes() == config_state
-    print(f"{sys.platform} pnpm {version} unsafe_store=125 native_to_isolated_to_native=0", flush=True)
+    print(
+        f"{sys.platform} pnpm {version} store_missing=125 existing_node_modules=unchanged "
+        "isolated_install=0 native_add=0 isolated_add=0",
+        flush=True,
+    )
 
 
 def test_manager(cli, tool, manager):
