@@ -482,6 +482,14 @@ async fn run_command(
     } else {
         None
     };
+    if exit_code == 0
+        && options.mode == Mode::Observe
+        && !options.comparison.ci
+        && options.comparison.input.is_some()
+        && !volume_anomalies.is_empty()
+    {
+        (exit_code, reason) = (volume::OBSERVED_ANOMALY, "volume_anomaly");
+    }
     if shorthand_ci(&options)
         && !options.save_baseline
         && comparison.is_none()

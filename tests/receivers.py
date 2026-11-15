@@ -247,7 +247,8 @@ def volume_test(fixture, project, evidence, node_root):
         env = dict(os.environ, VEIL_TELL_FIXTURE_RECEIVER=address)
         cases = [
             ("train", ["observe", "--baseline-out", baseline], 4096, 4096, 0),
-            ("observe", ["observe", "--baseline", baseline], 524288, 524288, 0),
+            ("observe", ["observe", "--baseline", baseline], 524288, 524288, 21),
+            ("no-baseline", ["observe"], 524288, 524288, 0),
             ("restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
             ("ci", ["ci", "--baseline", baseline], 524288, 131072, 22),
         ]
@@ -260,11 +261,13 @@ def volume_test(fixture, project, evidence, node_root):
                 runtime = demo / "runtime"
             env["PATH"] = f"{runtime / 'bin'}:{env['PATH']}"
             shutil.copyfile(SCRIPT, demo / "probe.py")
-            (demo / "package.json").write_text(json.dumps({
-                "name": "veil-volume-fixture", "version": "1.2.3", "private": True,
-                "scripts": {"postinstall": f"{sys.executable} -B probe.py volume 524288"},
-            }))
-            cases.append(("postinstall", ["ci", "--baseline", baseline], 524288, 131072, 22))
+            install_baseline = evidence / "install-volume-baseline.json"
+            cases.extend([
+                ("install-train", ["observe", "--baseline-out", install_baseline], 4096, 4096, 0),
+                ("install-observe", ["observe", "--baseline", install_baseline], 524288, 524288, 21),
+                ("install-ci", ["ci", "--baseline", install_baseline], 524288, 131072, 22),
+                ("install-restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
+            ])
 
         for name, arguments, sent, expected, code in cases:
             received = []
@@ -283,12 +286,19 @@ def volume_test(fixture, project, evidence, node_root):
             thread.start()
             report = evidence / f"volume-{name}.json"
             try:
-                command = (["npm", "--no-update-notifier", "run", "postinstall"] if name == "postinstall"
-                           else [sys.executable, "-B", "probe.py", "volume", str(sent)])
+                install = name.startswith("install-")
+                if install:
+                    (demo / "package.json").write_text(json.dumps({
+                        "name": "veil-volume-fixture", "version": "1.2.3", "private": True,
+                        "scripts": {"postinstall": f"{sys.executable} -B probe.py volume {sent}"},
+                    }))
+                    command = ["npm", "install", "--no-audit", "--no-fund", "--no-update-notifier"]
+                else:
+                    command = [sys.executable, "-B", "probe.py", "volume", str(sent)]
                 child = subprocess.run(
                     [fixture, *arguments, *([] if arguments[0] == "ci" else ["--backend", "isolated"]),
                      "--report", report, "--", *command],
-                    cwd=demo if name == "postinstall" else project,
+                    cwd=demo if install else project,
                     env=env, capture_output=True, text=True, timeout=12,
                 )
             finally:
@@ -297,14 +307,19 @@ def volume_test(fixture, project, evidence, node_root):
             result = json.loads(report.read_text())
             assert result["child_status"]["exit_code"] == 0, (child.stdout, child.stderr, result)
             assert result["destinations"][0]["sent_bytes"] == expected
-            if name != "train":
+            if code:
                 anomaly, = result["volume_anomalies"]
                 assert anomaly["blocked"] == (code == 22), result
-                if name == "postinstall":
+                assert result["run_status"]["reason"] == (
+                    "volume_limit_exceeded" if code == 22 else "volume_anomaly"
+                ), result
+                if install:
                     source, = anomaly["attribution"]
                     assert source["package"]["name"] == "veil-volume-fixture"
                     assert source["package"]["script"] == "postinstall"
                 print(next(line for line in child.stderr.splitlines() if "volume anomaly" in line))
+            else:
+                assert not result.get("volume_anomalies"), result
             print(f"receiver case=volume-{name} os={sys.platform} bytes={expected} child=0 exit={code}")
 
 

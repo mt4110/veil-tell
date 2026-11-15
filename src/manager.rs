@@ -56,6 +56,7 @@ mod tests {
             (&["bun", "install"][..], Some("bun")),
             (&["cargo", "build"][..], Some("cargo")),
             (&["npm", "publish"][..], None),
+            (&["cargo", "publish"][..], None),
             (&["node", "install"][..], None),
         ] {
             assert_eq!(
