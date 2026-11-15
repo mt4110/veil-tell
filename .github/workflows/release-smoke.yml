@@ -63,7 +63,8 @@ jobs:
             sudo ip -n veil-receiver link set veil-test-peer up
             printf '192.0.1.2 volume.test\n' | sudo tee -a /etc/hosts >/dev/null
             # shellcheck disable=SC2024 # the runner owns the evidence file
-            sudo ip netns exec veil-receiver python3 -u "$PWD/tests/release-smoke.py" receive               > "$RUNNER_TEMP/receiver.log" 2>&1 &
+            sudo ip netns exec veil-receiver python3 -u "$PWD/tests/release-smoke.py" receive \
+              > "$RUNNER_TEMP/receiver.log" 2>&1 &
             for _ in {1..20}; do
               if grep -qx ready "$RUNNER_TEMP/receiver.log"; then break; fi
               sleep 0.25

@@ -118,6 +118,8 @@ def check():
         assert data["comparison"]["added"][0]["host"] == "new.test"
         assert data["destinations"][0]["result"] == "blocked"
     elif case == "dns":
+        assert data["run_status"]["reason"] == "new_destination"
+        assert data["coverage"]["dns_attempts"] == "node_dns_lookup_hook"
         assert not data["comparison"]["added"]
         attempt, = data["comparison"]["attempted_added"]
         assert attempt["host"] == "release-smoke-dns.invalid"
@@ -142,7 +144,8 @@ def check():
             if case == "dns":
                 assert "<code>release-smoke-dns.invalid</code>" in summary, summary
             if case == "volume":
-                assert "bytes 131072/131072" in summary, summary
+                assert "bytes 131072/262144" in summary, summary
+                assert "max bytes per connection 131072/131072" in summary, summary
             (evidence / "summary.md").write_text(summary)
             break
     else:

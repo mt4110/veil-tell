@@ -47,6 +47,7 @@ runs:
           --source-ref "refs/tags/v$version" --deny-self-hosted-runners
         tar -xzf "$archive"
         install -m 755 "veil-tell-$version-$platform/veil-tell" bin/veil-tell
+        test "$(bin/veil-tell --version)" = "veil-tell $version"
     - name: Compare outbound destinations
       id: check
       shell: bash
