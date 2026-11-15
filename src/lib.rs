@@ -512,6 +512,24 @@ async fn run_command(
     if let Some(file) = report {
         file.save_report(&result)?;
     }
+    let install_hint = match (result.run_status.reason, executable) {
+        ("child_failed", Some("pnpm"))
+            if cfg!(target_os = "macos")
+                && options.backend == Backend::Isolated
+                && result
+                    .destinations
+                    .iter()
+                    .any(|destination| destination.result == "completed") =>
+        {
+            Some(
+                "if pnpm 12.4.x cannot verify TLS in the sandbox, update to pnpm 12.21.0 or later / pnpm 12.4.x の隔離内 TLS 検証失敗なら pnpm 12.21.0 以降に更新",
+            )
+        }
+        ("child_failed", Some("pnpm" | "yarn" | "bun")) => Some(
+            "check that the pinned package manager and Node.js are visible inside isolation, then check the project cache and registry URL / 固定したツールが隔離内で見えるか確認し、キャッシュとレジストリ URL を点検",
+        ),
+        _ => None,
+    };
     if let Some(diff) = &result.comparison {
         if diff.created() && attribute_cargo {
             for destination in &result.destinations {
@@ -533,15 +551,12 @@ async fn run_command(
         diff.display(
             options.comparison.automatic,
             !result.volume_anomalies.is_empty(),
+            install_hint,
         );
     } else if volume_blocked {
         eprintln!("Next / 次: review volume_anomalies / レポートの送信量と上限を確認");
-    } else if result.run_status.exit_code != 0
-        && matches!(executable, Some("pnpm" | "yarn" | "bun"))
-    {
-        eprintln!(
-            "Next / 次: check the runtime, project cache and registry proxy settings / 実行環境・プロジェクト内キャッシュ・レジストリのプロキシ設定を確認"
-        );
+    } else if let Some(hint) = install_hint {
+        eprintln!("Next / 次: {hint}");
     } else if options.shorthand {
         let next = if result.run_status.exit_code == 0 {
             "veil-tell --save-baseline COMMAND"

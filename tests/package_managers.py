@@ -20,6 +20,7 @@ def test_manager(cli, tool, manager):
         project = root / "project"
         project.mkdir()
         env = dict(os.environ, PATH=f"{tool.parent}:{os.environ['PATH']}")
+        version = subprocess.check_output([tool, "--version"], env=env, text=True).strip()
         runtime_tool = tool
         if sys.platform == "linux":
             # Bubblewrap exposes the workspace, /usr and /nix/store.
@@ -39,18 +40,23 @@ def test_manager(cli, tool, manager):
         })
         write_json(project / "package.json", package)
         command = [runtime_tool, "install"]
-        if manager == "pnpm":
+        if manager == "npm":
+            (project / ".npmrc").write_text("install-links=true\naudit=false\nfund=false\n")
+        elif manager == "pnpm":
+            lifecycle = ("allowBuilds:\n  probe: true\n  probe@file:before: true\n  probe@file:dep: true\n"
+                         if not version.startswith("9.") else (
+                "onlyBuiltDependencies:\n  - probe\nmanagePackageManagerVersions: false\n"
+            ))
             (project / "pnpm-workspace.yaml").write_text(
-                "onlyBuiltDependencies:\n  - probe\nupdateNotifier: false\n"
-                "managePackageManagerVersions: false\nstoreDir: .pnpm-store\n"
+                "packages:\n  - no-workspaces/*\n" + lifecycle + "updateNotifier: false\nstoreDir: .pnpm-store\n"
             )
             (project / ".npmrc").write_text("update-notifier=false\n")
             command += ["--offline"]
         elif manager == "yarn":
-            if subprocess.check_output([tool, "--version"], env=env, text=True).startswith("1."):
+            if version.startswith("1."):
                 command += ["--offline"]
             else:
-                (project / ".yarnrc.yml").write_text("enableNetwork: false\nenableGlobalCache: false\nenableImmutableInstalls: false\n")
+                (project / ".yarnrc.yml").write_text("enableNetwork: false\nenableScripts: true\nenableGlobalCache: false\nenableImmutableInstalls: false\n")
 
         def run(args):
             start = time.monotonic()
@@ -67,14 +73,19 @@ def test_manager(cli, tool, manager):
         local, isolated = run([cli, *command])
         assert local.returncode == 0, (local.stdout, local.stderr)
         baseline = project / ".veil-tell" / f"{manager}.json"
-        assert json.loads(baseline.read_text())["backend"] == "isolated"
+        recorded = json.loads(baseline.read_text())
+        assert recorded["backend"] == "isolated"
+        assert recorded["lockfile"]["ecosystem"] == manager, recorded
         for _ in range(5):
             stable, _ = run([cli, *command])
             assert stable.returncode == 0 and "veil-tell accept" not in stable.stderr, stable.stderr
+            assert "volume anomaly" not in stable.stderr, stable.stderr
             assert not (baseline.parent / "pending.json").exists()
         stable_ci, _ = run([cli, "ci", "--json", "--", *command])
-        assert stable_ci.returncode == 0 and json.loads(stable_ci.stdout)["comparison"]["status"] == "compared", stable_ci
-        print(f"{sys.platform} {manager} stable=5 ci=0 control={elapsed:.3f}s isolated={isolated:.3f}s", flush=True)
+        comparison = json.loads(stable_ci.stdout)["comparison"]
+        assert stable_ci.returncode == 0 and comparison["status"] == "compared", stable_ci
+        assert "lockfile_changes" in comparison, comparison
+        print(f"{sys.platform} {manager} {version} stable=5 ci=0 control={elapsed:.3f}s isolated={isolated:.3f}s", flush=True)
 
         dep = project / "dep"
         dep.mkdir()
@@ -87,7 +98,8 @@ def test_manager(cli, tool, manager):
             'fetch("https://new-package.invalid").then(() => process.exit(2), '
             'error => { if (error.cause?.code !== "ENOTFOUND") process.exit(3) });\n'
         )
-        updated, _ = run([cli, "ci", "--json", "--", *command])
+        update_flags = ["--force"] if manager == "pnpm" and version.startswith("9.") else []
+        updated, _ = run([cli, "ci", "--json", "--", *command, *update_flags])
         assert updated.returncode == 21, (updated.stdout, updated.stderr)
         report = json.loads(updated.stdout)
         attempt, = report["comparison"]["attempted_added"]
