@@ -21,6 +21,7 @@ def test_manager(cli, tool, manager):
         project.mkdir()
         env = dict(os.environ, PATH=f"{tool.parent}:{os.environ['PATH']}")
         version = subprocess.check_output([tool, "--version"], env=env, text=True).strip()
+        env.pop("CI", None)
         runtime_tool = tool
         if sys.platform == "linux":
             # Bubblewrap exposes the workspace, /usr and /nix/store.

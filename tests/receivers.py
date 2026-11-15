@@ -346,6 +346,19 @@ def dns_attempt_test(cli, project, evidence, runtime):
     print(next(line for line in child.stderr.splitlines() if "attempted (blocked)" in line))
     print(f"receiver case=node-dns os={sys.platform} connect=0 child=0 exit=21")
 
+    for ci, expected in (("false", 0), ("true", 21)):
+        child = subprocess.run(
+            [cli, "--json", "node", "probe.cjs"], cwd=demo, env=dict(env, CI=ci),
+            capture_output=True, text=True, timeout=10,
+        )
+        data = json.loads(child.stdout)
+        assert child.returncode == expected and data["child_status"]["exit_code"] == 0, child.stderr
+        assert [record["host"] for record in data["attempted"]] == ["postinstall.invalid"]
+    quiet = subprocess.run([cli, "--json", "/usr/bin/true"], cwd=demo, env=env,
+                           capture_output=True, text=True, timeout=10)
+    data = json.loads(quiet.stdout)
+    assert data["attempted"] == [] and "DNS attempts recorded" not in quiet.stderr
+
     flood = evidence / "dns-overflow.json"
     child = subprocess.run(
         [cli, "observe", "--backend", "isolated", "--report", flood, "--", "node", "-e",
@@ -779,6 +792,7 @@ def npm_test(fixture, runtime, project, evidence, policy, ip):
 
 
 if __name__ == "__main__":
+    os.environ.pop("CI", None)
     if sys.argv[1] == "probe":
         probe(*sys.argv[2:])
     elif sys.argv[1] == "invalid-proxy-auth":

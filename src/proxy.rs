@@ -21,6 +21,36 @@ const HEADER_LIMIT: usize = 16_384;
 const CONNECT_LIMIT: Duration = Duration::from_secs(5);
 const IDLE_LIMIT: Duration = Duration::from_secs(60);
 const MAX_CONNECTIONS: usize = 64;
+const MAX_DNS_NAMES: usize = 1024;
+const MAX_DNS_ATTEMPTS: u64 = 16384;
+
+#[derive(Default)]
+pub struct DnsAttempts {
+    pub names: std::collections::BTreeMap<String, Attempted>,
+    total: u64,
+}
+
+impl DnsAttempts {
+    fn record(&mut self, host: String, source: Option<Attribution>) -> bool {
+        if self.total >= MAX_DNS_ATTEMPTS
+            || (self.names.len() >= MAX_DNS_NAMES && !self.names.contains_key(&host))
+        {
+            return false;
+        }
+        self.total += 1;
+        let attempt = self.names.entry(host.clone()).or_insert_with(|| Attempted {
+            host,
+            attempts: 0,
+            attribution: Default::default(),
+        });
+        attempt.attempts += 1;
+        crate::attribution::record(
+            &mut attempt.attribution,
+            source.unwrap_or_else(Attribution::unknown),
+        );
+        true
+    }
+}
 
 pub struct Proxy {
     pub mode: Mode,
@@ -31,7 +61,7 @@ pub struct Proxy {
     pub compare_unauthenticated: bool,
     pub records: Records,
     pub budgets: std::collections::BTreeMap<String, crate::volume::Budget>,
-    pub dns_attempts: Option<std::sync::Mutex<std::collections::BTreeMap<String, Attempted>>>,
+    pub dns_attempts: Option<std::sync::Mutex<DnsAttempts>>,
     pub incomplete: AtomicBool,
     pub interfaces: Vec<IpAddr>,
     pub fixture: Option<crate::FixtureResolver>,
@@ -293,22 +323,8 @@ where
         if !authorized {
             return response(&mut stream, AUTH_REQUIRED).await;
         }
-        {
-            let mut records = records.lock().unwrap();
-            if records.len() >= 1024 && !records.contains_key(&host) {
-                state.incomplete.store(true, Ordering::Relaxed);
-            } else {
-                let attempt = records.entry(host.clone()).or_insert_with(|| Attempted {
-                    host,
-                    attempts: 0,
-                    attribution: Default::default(),
-                });
-                attempt.attempts += 1;
-                crate::attribution::record(
-                    &mut attempt.attribution,
-                    attribution.unwrap_or_else(Attribution::unknown),
-                );
-            }
+        if !records.lock().unwrap().record(host, attribution) {
+            state.incomplete.store(true, Ordering::Relaxed);
         }
         return response(&mut stream, "403 Forbidden").await;
     }
