@@ -1,0 +1,110 @@
+name: Verify veil-tell 0.5.1 Action
+on:
+  push:
+    branches: [feat/verify-v051-action]
+permissions:
+  contents: read
+  attestations: read
+jobs:
+  action:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, ubuntu-26.04]
+        case: [unchanged, new, dns, volume]
+        include:
+          - case: unchanged
+            expected: 0
+            outcome: success
+          - case: new
+            expected: 21
+            outcome: failure
+          - case: dns
+            expected: 21
+            outcome: failure
+          - case: volume
+            expected: 22
+            outcome: failure
+    name: Action / ${{ matrix.runner }} / ${{ matrix.case }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare fixture
+        env:
+          CASE: ${{ matrix.case }}
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -s)" == Linux && ! -x /usr/bin/bwrap ]]; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
+          mkdir -p .veil-tell
+          cat > package.json <<'JSON'
+          {"name":"veil-release-smoke","version":"1.0.0","private":true,"scripts":{"postinstall":"python3 -B probe.py"}}
+          JSON
+          printf 'update-notifier=false\n' > .npmrc
+          printf '%s\n' "$CASE" > case.txt
+          python3 -B tests/release-smoke.py prepare "$CASE"
+          if [[ "$CASE" == volume && "$(uname -s)" == Darwin ]]; then
+            printf '192.0.1.2 volume.test\n' | sudo tee -a /etc/hosts >/dev/null
+            /bin/bash tests/release-smoke-receiver.sh > "$RUNNER_TEMP/receiver.log" 2>&1 &
+          elif [[ "$CASE" == volume ]]; then
+            # Keep synthetic payload and DNS on this disposable runner.
+            # The host proxy's production address checks still execute.
+            sudo ip netns add veil-receiver
+            sudo ip link add veil-test-host type veth peer name veil-test-peer
+            sudo ip link set veil-test-peer netns veil-receiver
+            sudo ip addr add 192.0.1.1/30 dev veil-test-host
+            sudo ip link set veil-test-host up
+            sudo ip -n veil-receiver addr add 192.0.1.2/30 dev veil-test-peer
+            sudo ip -n veil-receiver link set veil-test-peer up
+            printf '192.0.1.2 volume.test\n' | sudo tee -a /etc/hosts >/dev/null
+            # shellcheck disable=SC2024 # the runner owns the evidence file
+            sudo ip netns exec veil-receiver python3 -u "$PWD/tests/release-smoke.py" receive \
+              > "$RUNNER_TEMP/receiver.log" 2>&1 &
+            for _ in {1..20}; do
+              if grep -qx ready "$RUNNER_TEMP/receiver.log"; then break; fi
+              sleep 0.25
+            done
+            grep -qx ready "$RUNNER_TEMP/receiver.log"
+            touch receiver.ready
+          fi
+      - uses: mt4110/veil-tell@9fc9dc4e7eee5dadde451a5d96aa7f5e07d4c43e
+        id: veil
+        continue-on-error: true
+        with:
+          command: npm run postinstall
+      - name: Check JSON, receiver and job summary
+        if: always()
+        env:
+          CASE: ${{ matrix.case }}
+          EXPECTED: ${{ matrix.expected }}
+          EXPECTED_OUTCOME: ${{ matrix.outcome }}
+          ACTION_OUTCOME: ${{ steps.veil.outcome }}
+          REPORT: ${{ steps.veil.outputs.report }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/evidence"
+          "$RUNNER_TEMP/veil-tell/bin/veil-tell" --version > "$RUNNER_TEMP/evidence/version.txt"
+          grep -Fx 'veil-tell 0.5.1' "$RUNNER_TEMP/evidence/version.txt"
+          if [[ -n "$REPORT" && -f "$REPORT" ]]; then
+            cp "$REPORT" "$RUNNER_TEMP/evidence/report.json"
+          fi
+          if [[ "$CASE" == volume && -f "$RUNNER_TEMP/receiver.log" ]]; then
+            touch receiver.stop
+            for _ in {1..40}; do
+              if grep -q '^connections=' "$RUNNER_TEMP/receiver.log"; then break; fi
+              sleep 0.25
+            done
+            cp "$RUNNER_TEMP/receiver.log" "$RUNNER_TEMP/evidence/receiver.log"
+          fi
+          python3 -B tests/release-smoke.py check
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: smoke-${{ matrix.runner }}-${{ matrix.case }}
+          path: ${{ runner.temp }}/evidence/
+          if-no-files-found: error
