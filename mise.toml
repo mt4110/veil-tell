@@ -2,7 +2,7 @@
 idiomatic_version_file_enable_tools = ["rust"]
 
 [tools]
-node = "24.12.0"
+node = "26.13.1"
 
 [tasks.fmt]
 run = "cargo fmt --all -- --check"
