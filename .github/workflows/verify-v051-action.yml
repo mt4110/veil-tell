@@ -1,4 +1,5 @@
 name: Verify veil-tell 0.5.1 Action
+run-name: Public veil-tell @v0 with v0.5.1
 on:
   push:
     branches: [feat/verify-v051-action]
@@ -72,9 +73,9 @@ jobs:
             grep -qx ready "$RUNNER_TEMP/receiver.log"
             touch receiver.ready
           fi
-      - uses: mt4110/veil-tell@9fc9dc4e7eee5dadde451a5d96aa7f5e07d4c43e
+      - uses: mt4110/veil-tell@v0
         id: veil
-        continue-on-error: true
+        continue-on-error: ${{ matrix.case != 'new' }}
         with:
           command: npm run postinstall
       - name: Check JSON, receiver and job summary
