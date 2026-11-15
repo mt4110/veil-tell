@@ -90,11 +90,13 @@ Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. 
 | --- | --- | --- |
 | HTTP CONNECT reaching the proxy | Hostname and port | Hostname and port |
 | Supported Node.js lookups | Recorded by hostname and denied | Recorded by hostname and denied |
-| Native curl, Python and Go resolvers, or literal IPs | Direct destinations and counts are unobserved | Direct destinations and counts are unobserved |
+| System resolvers used by curl, Python, Go and Rust, or literal IPs | Direct destinations and counts are unobserved | Direct destinations and counts are unobserved |
 
 `CI=true veil-tell npm install` requires isolation and an existing baseline, and returns `21` for new CONNECT destinations or newly observed lookup attempts. Local shorthand does not fail solely on recorded lookup attempts. Explicit `observe --baseline FILE` reports an outbound volume anomaly with exit `21`; an enforced tunnel cutoff still uses `22`. Small transfers below the threshold and totals spanning several runs are outside volume comparison.
 
 If pnpm 12.4.x fails TLS verification in macOS isolation, use the tested pnpm 12.21.0 or a later version. [Cause and measurements (Japanese)](docs/destination-diff.md#pnpm-12-の-macos-tls-とバージョン別の回帰試験)
+
+To switch between isolated and plain pnpm in the same workspace, set `storeDir: .pnpm-store` in `pnpm-workspace.yaml`. With pnpm 9, also set `store-dir=.pnpm-store` in `.npmrc`. [Setup and recovery](docs/runbook.md#11-pnpm-のストアを隔離内外でそろえる)
 
 veil-tell overlaps with host-level controls in LuLu, Little Snitch, and OpenSnitch, process isolation in Firejail, and traffic inspection in mitmproxy. Its unit of observation is the command it launches, and a reviewed policy can be used locally and in CI. [Comparison with related tools](docs/design.md#8-先行例との関係)
 

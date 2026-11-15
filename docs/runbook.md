@@ -684,3 +684,23 @@ jq '{
     {host, port, decision, result, sent_bytes, received_bytes}]
 }' pr76-normal/report.json pr76-control/report.json
 ```
+
+## 11. pnpm のストアを隔離内外でそろえる
+
+作業ディレクトリのルートにある `pnpm-workspace.yaml` に、以下の設定を追加します。既存の設定は残します。
+
+```yaml
+storeDir: .pnpm-store
+```
+
+pnpm 9 で新しく `pnpm-workspace.yaml` を作る場合は `packages: ['.']` も設定し、`.npmrc` に `store-dir=.pnpm-store` を追加します。共有するのはワークスペース内のストアです。`pnpm store path` で、同ルートの `.pnpm-store/v…` を指すことを確認します。ストア本体はキャッシュなので Git の管理対象から除きます。次の例は、試験用の pnpm プロジェクトで実行します。
+
+```sh
+pnpm store path
+veil-tell pnpm install
+pnpm add is-odd
+```
+
+依存を操作する pnpm を直接隔離して起動する場合、veil-tell は隔離内で `pnpm config get store-dir` と `pnpm store path` を実行し、プロジェクトの設定と実際のストアパスが一致することを確認します。設定がなければ依存操作の起動前に `125` を返します。環境変数やコマンド引数でストアを切り替える場合は、作業ディレクトリの設定に統一してください。作業ディレクトリを変更するオプションを使う場合は、先にワークスペースルートへ移動します。
+
+公開版 v0.5.0 で既に `ERR_PNPM_UNEXPECTED_STORE` が出る場合は、上記の設定を追加し、veil-tell を付けずにルートで `pnpm install --ignore-scripts` を実行して既存のロックファイルから依存を入れ直します。pnpm 12.21.0 では、その後に素の `pnpm add is-odd` が成功し、`node_modules/.modules.yaml` がプロジェクト内のストアを指すことを確認しました。
