@@ -5,6 +5,7 @@ mod cli;
 mod isolation;
 mod lockfile;
 mod manager;
+mod pnpm;
 mod policy;
 mod proxy;
 mod report;
@@ -189,10 +190,11 @@ async fn run_command(
             "choose distinct paths for the report and generated files",
         ));
     }
+    let secret = credential()?;
     if options.backend == Backend::Isolated {
         isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
+        pnpm::validate_store(&options.command, cwd, &outputs, protected_dirs, &secret).await?;
     }
-    let secret = credential()?;
     let executable = manager::executable(&options.command);
     let node_manager = match executable {
         Some("pnpm") => Some("pnpm"),
@@ -694,7 +696,10 @@ pub fn entry(fixture: Option<FixtureResolver>) -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("veil-tell: {error}");
-            eprintln!("Next / 次: veil-tell --help");
+            let next = error
+                .downcast_ref::<pnpm::StoreError>()
+                .map_or("veil-tell --help", |error| error.next);
+            eprintln!("Next / 次: {next}");
             ExitCode::from(SETUP_FAILURE)
         }
     }

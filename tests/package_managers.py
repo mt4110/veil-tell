@@ -14,6 +14,72 @@ def write_json(path, value):
     path.write_text(json.dumps(value) + "\n")
 
 
+def test_pnpm_store(cli, tool, workspace, env, version):
+    project = workspace / "store-interoperability"
+    project.mkdir()
+    home = workspace / "native-home"
+    home.mkdir()
+    env = dict(env, HOME=str(home), XDG_DATA_HOME=str(home / "data"))
+    if sys.platform == "linux":
+        runtime = project / "runtime"
+        shutil.copytree(tool.parent.parent, runtime, symlinks=True)
+        tool = runtime / tool.parent.name / tool.name
+        env["PATH"] = f"{tool.parent}:{env['PATH']}"
+    dependency = project / "fixture"
+    dependency.mkdir()
+    write_json(dependency / "package.json", {"name": "test-store-dependency", "version": "1.0.0"})
+    for name in ("plain-extra", "wrapped-extra"):
+        extra = project / name
+        extra.mkdir()
+        write_json(extra / "package.json", {"name": name, "version": "1.0.0"})
+    write_json(project / "package.json", {
+        "name": "test-store-project", "version": "1.0.0", "private": True,
+        "dependencies": {"test-store-dependency": "file:./fixture"},
+    })
+
+    def invoke(*args, expected=0):
+        child = subprocess.run(args, cwd=project, env=env, text=True, capture_output=True, timeout=30)
+        assert child.returncode == expected, (args, child.stdout, child.stderr)
+        return child
+
+    guarded = invoke(cli, tool, "install", "--offline", expected=125)
+    assert "storeDir: .pnpm-store" in guarded.stderr, guarded.stderr
+    modules = project / "node_modules" / ".modules.yaml"
+    assert not modules.exists()
+    # The guard also preserves a dependency tree previously installed by plain pnpm.
+    invoke(tool, "install", "--offline")
+    native_modules = modules.read_bytes()
+    invoke(cli, tool, "install", "--offline", expected=125)
+    assert modules.read_bytes() == native_modules
+
+    config = project / "pnpm-workspace.yaml"
+    install_settings = "packages: ['.']\nstoreDir: .pnpm-store\n"
+    config.write_text(install_settings)
+    if version.startswith("9."):
+        wrong_store = invoke(cli, tool, "install", "--offline", expected=125)
+        assert "pnpm store path" in wrong_store.stderr, wrong_store.stderr
+        (project / ".npmrc").write_text("store-dir=.pnpm-store\n")
+    # Keep the original tree for the test. The next install starts empty.
+    modules.parent.rename(project / "native-modules")
+    override = invoke(cli, tool, "--store-dir", ".other-store", "install", "--offline", expected=125)
+    assert "workspace configured in the current directory" in override.stderr, override.stderr
+    assert not modules.exists()
+    invoke(cli, tool, "install", "--offline")
+    store = Path(invoke(tool, "store", "path").stdout.strip()).resolve()
+    assert store.parent == project / ".pnpm-store", store
+    assert str(store) in modules.read_text(), modules.read_text()
+    config_state = config.read_bytes()
+    assert config_state.decode() == install_settings
+    invoke(tool, "add", "-w", "--offline", "file:./plain-extra")
+    invoke(cli, tool, "add", "-w", "--offline", "file:./wrapped-extra")
+    installed = json.loads((project / "package.json").read_text())["dependencies"]
+    assert {"plain-extra", "wrapped-extra"} <= installed.keys()
+    report = invoke(cli, "--json", tool, "install", "--offline")
+    assert json.loads(report.stdout)["run_status"]["exit_code"] == 0
+    assert str(store) in modules.read_text() and config.read_bytes() == config_state
+    print(f"{sys.platform} pnpm {version} unsafe_store=125 native_to_isolated_to_native=0", flush=True)
+
+
 def test_manager(cli, tool, manager):
     with tempfile.TemporaryDirectory(prefix=f"veil-pm-{manager}-") as folder:
         root = Path(folder).resolve()
@@ -29,6 +95,8 @@ def test_manager(cli, tool, manager):
             shutil.copytree(tool.parent.parent, runtime, symlinks=True)
             runtime_tool = runtime / tool.parent.name / tool.name
             env["PATH"] = f"{runtime_tool.parent}:{os.environ['PATH']}"
+        if manager == "pnpm":
+            test_pnpm_store(cli, runtime_tool, project, env, version)
         package = {"name": "fixture", "private": True, "version": "1.0.0"}
         if manager == "bun":
             package["trustedDependencies"] = ["probe"]
@@ -51,7 +119,10 @@ def test_manager(cli, tool, manager):
             (project / "pnpm-workspace.yaml").write_text(
                 "packages:\n  - no-workspaces/*\n" + lifecycle + "updateNotifier: false\nstoreDir: .pnpm-store\n"
             )
-            (project / ".npmrc").write_text("update-notifier=false\n")
+            npmrc = "update-notifier=false\n"
+            if version.startswith("9."):
+                npmrc += "store-dir=.pnpm-store\n"
+            (project / ".npmrc").write_text(npmrc)
             command += ["--offline"]
         elif manager == "yarn":
             if version.startswith("1."):

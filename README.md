@@ -90,11 +90,13 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 | --- | --- | --- |
 | プロキシに届く HTTP CONNECT | ホスト名とポート | ホスト名とポート |
 | 対応する Node.js の名前解決 | ホスト名を記録して拒否 | ホスト名を記録して拒否 |
-| curl・Python・Go の標準リゾルバ、IP 直打ち | 直接通信の試行先・件数は未観測 | 直接通信の試行先・件数は未観測 |
+| curl・Python・Go・Rust のシステムリゾルバ、IP 直打ち | 直接通信の試行先・件数は未観測 | 直接通信の試行先・件数は未観測 |
 
 `CI=true veil-tell npm install` は隔離と既存の基準を使い、新規 CONNECT や観測できた新規名前解決の試行で `21` を返します。ローカルの短い形式は観測した試行だけを理由に失敗させません。明示的な `observe --baseline FILE` は送信量の異常を記録して `21` を返し、制限による切断は `22` を返します。少量ずつの送信や実行をまたぐ累計は比較範囲外です。
 
 macOS の隔離で pnpm 12.4.x の TLS 検証エラーが出る場合は、実測で通った pnpm 12.21.0 以降を使ってください。[原因と実測](docs/destination-diff.md#pnpm-12-の-macos-tls-とバージョン別の回帰試験)
+
+隔離した pnpm と素の pnpm を同じ作業ディレクトリで使うには、`pnpm-workspace.yaml` に `storeDir: .pnpm-store` を設定します。pnpm 9 は `.npmrc` にも `store-dir=.pnpm-store` を設定してください。[設定と復旧手順](docs/runbook.md#11-pnpm-のストアを隔離内外でそろえる)
 
 LuLu・Little Snitch・OpenSnitch のホスト側制御、Firejail のプロセス隔離、mitmproxy の通信調査と用途が重なります。veil-tell では、起動したコマンドを単位として観測し、レビューしたポリシーをローカルと CI で使えます。 [先行例との比較](docs/design.md#8-先行例との関係)
 

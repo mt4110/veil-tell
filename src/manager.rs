@@ -7,25 +7,42 @@ pub fn executable(command: &[OsString]) -> Option<&str> {
     Path::new(command.first()?).file_name()?.to_str()
 }
 
-pub fn install_key(command: &[OsString]) -> Option<&str> {
-    let manager = executable(command)?;
+pub fn verb(command: &[OsString]) -> Option<&str> {
+    let pnpm = executable(command) == Some("pnpm");
     let mut args = command.iter().skip(1);
-    let verb = loop {
+    loop {
         let Some(value) = args.next() else {
-            return (manager == "yarn").then_some(manager);
+            return Some("");
         };
         let value = value.to_str()?;
         if !value.starts_with('-') {
-            break value;
+            return Some(value);
         }
         match value {
             "--cwd" | "--dir" | "--prefix" | "--config" | "--filter" | "-C" | "-F" => {
                 args.next()?;
             }
+            "--workspace-dir" | "--store-dir" | "--config-dir" | "--userconfig"
+            | "--globalconfig"
+                if pnpm =>
+            {
+                args.next()?;
+            }
+            flag if pnpm && flag.starts_with("--config.") && !flag.contains('=') => {
+                args.next()?;
+            }
             "--version" | "--help" | "-v" | "-h" | "--" => return None,
             _ => {}
         }
-    };
+    }
+}
+
+pub fn install_key(command: &[OsString]) -> Option<&str> {
+    let manager = executable(command)?;
+    let verb = verb(command)?;
+    if manager == "yarn" && verb.is_empty() {
+        return Some(manager);
+    }
     let eligible = match manager {
         "npm" => matches!(verb, "install" | "i" | "ci" | "add" | "update" | "up"),
         "pnpm" | "yarn" | "bun" => matches!(
