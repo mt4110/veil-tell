@@ -463,12 +463,15 @@ def npm_destination_diff(cli, project, evidence, runtime):
     assert ci_data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
     assert ci_data["comparison"]["added"] == data["comparison"]["added"]
     assert ci_data["destinations"][0]["reason"] == "new_destination"
-    automatic = invoke([cli, *args])
-    assert automatic.returncode == 0 and "+ postinstall.local:443 (1)" in automatic.stderr
     default_baseline = demo / ".veil-tell/npm.json"
-    assert json.loads(default_baseline.read_text())["destinations"] == []
+    pending = default_baseline.with_name("pending.json")
+    assert not pending.exists()
+    original = default_baseline.read_bytes()
+    project_ci = invoke([cli, "ci", "--", *args])
+    assert project_ci.returncode == 21 and "veil-tell accept" in project_ci.stderr, project_ci.stderr
+    assert default_baseline.read_bytes() == original
     accepted = invoke([cli, "accept"])
-    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.returncode == 0 and not pending.exists(), accepted.stderr
     assert json.loads(default_baseline.read_text())["destinations"] == data["comparison"]["added"]
     stable = invoke([cli, *args])
     assert stable.returncode == 0 and "No new destinations" in stable.stderr

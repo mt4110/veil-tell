@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.5.0 (unreleased)
+## 0.5.2
+
+- Support an opt-in workspace home for install-time downloads that must survive isolation.
+- Run cached Corepack pnpm shims and home-installed pnpm toolchains in isolation. Distinguish launcher failures from store configuration errors.
+- Save a reviewable candidate when CI finds a new destination against the project baseline, so `veil-tell accept` can update that baseline after review.
+- Keep npm lifecycle attribution enabled when `NPM_CONFIG_PREFIX` only sets a prefix.
+
+## 0.5.1
+
+- Require an effective project-local pnpm store before running isolated dependency operations. Reject missing or incompatible settings with exit 125 before touching `node_modules`.
+
+## 0.5.0
 
 - Guide macOS users of pnpm 12.4.x toward a tested version with upstream sandbox-safe TLS verification. Exercise npm, three pnpm majors, both Yarn variants, and Bun.
 - Enforce recorded new lookup attempts in shorthand CI, omit empty human-facing DNS notices, and fail incomplete DNS capture at its recording limits.

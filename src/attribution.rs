@@ -214,7 +214,13 @@ pub fn annotate(shell: &mut std::process::Command, package: Option<Package>) {
     }
 }
 
-pub fn custom_npm_shell(cwd: &Path, command: &[OsString]) -> bool {
+pub fn custom_npm_shell(
+    cwd: &Path,
+    command: &[OsString],
+    backend: crate::cli::Backend,
+    project_home: Option<&Path>,
+) -> bool {
+    let inherits_env = backend == crate::cli::Backend::Proxy;
     let cli_config = command
         .iter()
         .skip(1)
@@ -226,22 +232,34 @@ pub fn custom_npm_shell(cwd: &Path, command: &[OsString]) -> bool {
                     || s.starts_with("--globalconfig")
             })
         });
-    let env_config = std::env::vars_os().any(|(key, _)| {
-        [
-            "npm_config_script_shell",
-            "npm_config_userconfig",
-            "npm_config_globalconfig",
-            "npm_config_prefix",
-        ]
-        .iter()
-        .any(|name| key.to_string_lossy().eq_ignore_ascii_case(name))
-    });
+    let env_config = inherits_env
+        && std::env::vars_os().any(|(key, _)| {
+            [
+                "npm_config_script_shell",
+                "npm_config_userconfig",
+                "npm_config_globalconfig",
+            ]
+            .iter()
+            .any(|name| key.to_string_lossy().eq_ignore_ascii_case(name))
+        });
     if cli_config || env_config {
         return true;
     }
     let mut configs: Vec<_> = cwd.ancestors().map(|path| path.join(".npmrc")).collect();
-    if let Some(home) = std::env::var_os("HOME") {
-        configs.push(PathBuf::from(home).join(".npmrc"));
+    if let Some(home) = project_home.map(Path::to_path_buf).or_else(|| {
+        inherits_env
+            .then(|| std::env::var_os("HOME"))
+            .flatten()
+            .map(PathBuf::from)
+    }) {
+        configs.push(home.join(".npmrc"));
+    }
+    if inherits_env {
+        configs.extend(std::env::vars_os().filter_map(|(key, value)| {
+            key.to_str()?
+                .eq_ignore_ascii_case("npm_config_prefix")
+                .then(|| cwd.join(value).join("etc/npmrc"))
+        }));
     }
     configs.extend(
         [
@@ -262,23 +280,38 @@ pub fn custom_npm_shell(cwd: &Path, command: &[OsString]) -> bool {
         }
     }
     configs.iter().any(|path| {
-        if !path.exists() {
-            return false;
-        }
-        read_manifest(path)
+        npmrc_has(path, |key, value| {
+            if npm_shell_setting(key) {
+                return true;
+            }
+            if key == "prefix" && !value.is_empty() {
+                // A prefix selects the default global npmrc. Retain shell overrides there.
+                return value.contains("${")
+                    || npmrc_has(&cwd.join(value).join("etc/npmrc"), |key, _| {
+                        npm_shell_setting(key)
+                    });
+            }
+            false
+        })
+    })
+}
+
+fn npm_shell_setting(key: &str) -> bool {
+    matches!(key, "script-shell" | "userconfig" | "globalconfig")
+}
+
+fn npmrc_has(path: &Path, predicate: impl Fn(&str, &str) -> bool) -> bool {
+    path.exists()
+        && read_manifest(path)
             .and_then(|bytes| String::from_utf8(bytes).ok())
             .is_none_or(|text| {
                 text.lines().any(|line| {
-                    line.split_once('=').is_some_and(|(key, _)| {
-                        matches!(
-                            key.trim()
-                                .trim_matches(['\'', '"'])
-                                .to_ascii_lowercase()
-                                .as_str(),
-                            "script-shell" | "userconfig" | "globalconfig" | "prefix"
+                    line.split_once('=').is_some_and(|(key, value)| {
+                        predicate(
+                            &key.trim().trim_matches(['\'', '"']).to_ascii_lowercase(),
+                            value.trim().trim_matches(['\'', '"']),
                         )
                     })
                 })
             })
-    })
 }

@@ -53,7 +53,7 @@ jobs:
             *) exit 1 ;;
           esac
           npm install --prefix "$runtime" --ignore-scripts --no-audit --no-fund --save-exact \
-            npm@11.20.0 pnpm9@npm:pnpm@9.15.9 pnpm10@npm:pnpm@10.34.9 \
+            npm@11.20.0 corepack@0.35.0 pnpm9@npm:pnpm@9.15.9 pnpm10@npm:pnpm@10.34.9 \
             "@pnpm/$pnpm_package@12.21.0" @yarnpkg/cli-dist@4.18.1 \
             yarn-classic@npm:yarn@1.22.22 "@oven/$bun_package@1.4.4"
           mkdir -p "$runtime/bin"
@@ -73,5 +73,7 @@ jobs:
             ln -s ../bin/node "$runtime/$variant/node"
             trials+=("$manager=$runtime/$variant/$manager")
           done
-          python3 -B tests/package_managers.py target/debug/veil-tell "${trials[@]}"
+          python3 -B tests/package_managers.py target/debug/veil-tell "${trials[@]}" \
+            "corepack=$runtime/node_modules/corepack/dist/corepack.js" \
+            "node=$runtime/bin/node" "standalone=$runtime/node_modules/@pnpm/$pnpm_package/pnpm"
       - run: python3 -B experiments/dns-attempts/probe.py

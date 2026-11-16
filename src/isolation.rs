@@ -1,7 +1,8 @@
 use crate::{Result, cli::Backend, error, proxy::Listener};
 use std::ffi::{OsStr, OsString};
 use std::io;
-use std::path::Path;
+use std::os::unix::fs::DirBuilderExt;
+use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
 use tokio::net::TcpListener;
 use tokio::process::Command;
@@ -19,11 +20,13 @@ pub struct Launch {
 }
 
 #[derive(Default)]
-pub struct AttributionConfig<'a> {
+pub struct LaunchConfig<'a> {
     pub npm: bool,
     pub cargo: bool,
     pub node_manager: Option<&'a str>,
     pub node_attribution: bool,
+    pub project_home: Option<&'a Path>,
+    pub pnpm_runtime: Option<&'a crate::pnpm::Runtime>,
 }
 
 pub async fn prepare(
@@ -33,26 +36,18 @@ pub async fn prepare(
     #[cfg_attr(not(target_os = "macos"), allow(unused_variables))] outputs: &[&Path],
     protected_dirs: &[&Path],
     secret: &str,
-    attribution: AttributionConfig<'_>,
+    config: LaunchConfig<'_>,
 ) -> Result<Launch> {
-    let AttributionConfig {
+    let LaunchConfig {
         npm: attribute_npm,
         cargo: attribute_cargo,
         node_manager,
         node_attribution,
-    } = attribution;
+        ..
+    } = config;
     #[cfg(target_os = "linux")]
     if backend == Backend::Isolated {
-        return linux::prepare(
-            command,
-            cwd,
-            secret,
-            attribute_npm,
-            attribute_cargo,
-            protected_dirs,
-            (node_manager, node_attribution),
-        )
-        .await;
+        return linux::prepare(command, cwd, secret, protected_dirs, config).await;
     }
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -91,7 +86,15 @@ pub async fn prepare(
     let (mut launch, temporary) = if backend == Backend::Isolated {
         #[cfg(target_os = "macos")]
         {
-            let home = tempfile::tempdir()?;
+            let home = config
+                .project_home
+                .is_none()
+                .then(tempfile::tempdir)
+                .transpose()?;
+            let home_path = config
+                .project_home
+                .or_else(|| home.as_ref().map(|dir| dir.path()))
+                .unwrap();
             // Named Mach and XPC services can perform network I/O outside the sandbox.
             let mut profile = format!(
                 "(version 1)\n(allow default)\n(deny network*)\n\
@@ -103,6 +106,11 @@ pub async fn prepare(
                 .filter_map(|output| output.parent())
                 .chain(protected_dirs.iter().copied())
                 .chain(wrapper.as_ref().map(|dir| dir.path()))
+                .chain(
+                    config
+                        .pnpm_runtime
+                        .and_then(|runtime| runtime.corepack_cache.as_deref()),
+                )
             {
                 let path = directory
                     .to_str()
@@ -114,8 +122,11 @@ pub async fn prepare(
             }
             let mut launch = Command::new("/usr/bin/sandbox-exec");
             launch.args(["-p", &profile]).args(command);
-            restricted_env(&mut launch, home.path());
-            (launch, Some(home))
+            restricted_env(&mut launch, home_path);
+            if let Some(runtime) = config.pnpm_runtime.filter(|runtime| runtime.corepack) {
+                crate::pnpm::configure_corepack(&mut launch, runtime.corepack_cache.as_deref());
+            }
+            (launch, home)
         }
         #[cfg(not(target_os = "macos"))]
         return Err(error("the isolated backend is unavailable on this OS"));
@@ -161,7 +172,7 @@ pub async fn probe(cwd: &Path) -> Result<()> {
         &[],
         &[],
         &crate::credential()?,
-        AttributionConfig::default(),
+        LaunchConfig::default(),
     )
     .await?;
     let output =
@@ -177,6 +188,47 @@ pub async fn probe(cwd: &Path) -> Result<()> {
             .filter(|s| !s.is_empty())
             .unwrap_or("sandbox probe failed"),
     ))
+}
+
+pub fn project_home(cwd: &Path, protected: &[&Path]) -> Result<Option<PathBuf>> {
+    let Some(relative) = std::env::var_os("VEIL_TELL_PROJECT_HOME") else {
+        return Ok(None);
+    };
+    let invalid = || {
+        error(
+            "VEIL_TELL_PROJECT_HOME must name a real relative directory inside the workspace, for example .veil-home",
+        )
+    };
+    let mut path = cwd.to_path_buf();
+    for part in Path::new(&relative).components() {
+        match part {
+            Component::CurDir => {}
+            Component::Normal(name) if name != ".git" && name != ".veil-tell" => path.push(name),
+            _ => return Err(invalid()),
+        }
+    }
+    if path == cwd
+        || protected
+            .iter()
+            .any(|dir| path.starts_with(dir) || dir.starts_with(&path))
+    {
+        return Err(invalid());
+    }
+    let mut builder = std::fs::DirBuilder::new();
+    builder.mode(0o700);
+    let mut directory = cwd.to_path_buf();
+    for part in path.strip_prefix(cwd)?.components() {
+        directory.push(part);
+        match builder.create(&directory) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(err) => return Err(err.into()),
+        }
+        if !directory.symlink_metadata()?.is_dir() {
+            return Err(invalid());
+        }
+    }
+    Ok(Some(path))
 }
 
 pub fn restricted_env(command: &mut Command, home: &Path) {

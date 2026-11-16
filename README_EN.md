@@ -12,6 +12,29 @@ veil-tell ci -- npm ci
 
 To check dependency updates in GitHub Actions, copy the [npm workflow template](examples/github-actions/veil-tell-npm.yml) to `.github/workflows/veil-tell-npm.yml` in your repository. Run **Check npm destinations** manually on the default branch, review the artifact's `npm.json`, and commit it as `.veil-tell/npm.json`. On the next dependency PR, the workflow checks `npm ci` against the PR base baseline. You can set this up on GitHub without installing veil-tell locally. [Setup guide (Japanese)](docs/runbook.md#10-npm-の依存更新-pr-に導入する)
 
+### Review a new CI destination
+
+When `veil-tell ci -- npm ci` or `CI=true veil-tell npm ci` returns `21` for a new CONNECT destination or lookup attempt, it saves a candidate in `.veil-tell/pending.json` if it used the project baseline. Review the destinations and why they appeared. To accept them, run the following from the same project root.
+
+```sh
+veil-tell accept
+git diff -- .veil-tell/npm.json
+veil-tell ci -- npm ci
+```
+
+Commit the reviewed baseline and exclude `.veil-tell/pending.json` from Git. For a finding from the GitHub Action or `ci --baseline FILE`, reproduce it locally with the same dependencies and comparison baseline using the project-baseline commands above.
+
+### Keep files installed into the home directory
+
+Isolation uses a temporary home by default. Set `VEIL_TELL_PROJECT_HOME` to a relative directory inside your project when downloaded files need to survive the install. For example, run this from a project that depends on Puppeteer.
+
+```sh
+VEIL_TELL_PROJECT_HOME=.veil-home veil-tell npm ci
+PUPPETEER_CACHE_DIR="$PWD/.veil-home/.cache/puppeteer" node app.js
+```
+
+Exclude `.veil-home/` from Git. For other packages that need the same home, you can set `HOME="$PWD/.veil-home"` when running the app. If your version of Puppeteer requires `proxy-agent` to download through a proxy, add a compatible version to your dependencies. On Linux, Puppeteer can use a compatible version of `yauzl` to extract the browser when `unzip` is absent. If your package manager requires approval for dependency install scripts, review and allow Puppeteer's script. [Puppeteer configuration](https://pptr.dev/guides/configuration)
+
 ### GitHub Actions results for v0.4.0
 
 We ran `uses: mt4110/veil-tell@v0` on macOS 26 and Ubuntu 26.04 and confirmed **`0` for no change, `21` for a blocked new destination, and `22` when the tunnel exceeded its outbound volume limit**. In the volume test, the receiver log and JSON agreed on **131,072 bytes** on both platforms. [macOS run](https://github.com/mt4110/veil-tell/actions/runs/43459261848) · [Ubuntu run](https://github.com/mt4110/veil-tell/actions/runs/43410515308) · [Reading job summaries, JSON, and receiver logs (Japanese)](docs/runbook.md#8-公開版-v040-の-github-actions-実測)
@@ -93,6 +116,8 @@ Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. 
 | System resolvers used by curl, Python, Go and Rust, or literal IPs | Direct destinations and counts are unobserved | Direct destinations and counts are unobserved |
 
 `CI=true veil-tell npm install` requires isolation and an existing baseline, and returns `21` for new CONNECT destinations or newly observed lookup attempts. Local shorthand does not fail solely on recorded lookup attempts. Explicit `observe --baseline FILE` reports an outbound volume anomaly with exit `21`; an enforced tunnel cutoff still uses `22`. Small transfers below the threshold and totals spanning several runs are outside volume comparison.
+
+For Corepack, run `corepack install` in the project root to cache the pnpm version named in `packageManager`. Then use `veil-tell pnpm install` or `veil-tell corepack pnpm install`. For a home-installed pnpm, put the installed launcher and Node.js on PATH.
 
 If pnpm 12.4.x fails TLS verification in macOS isolation, use the tested pnpm 12.21.0 or a later version. [Cause and measurements (Japanese)](docs/destination-diff.md#pnpm-12-の-macos-tls-とバージョン別の回帰試験)
 

@@ -35,7 +35,7 @@ runs:
           Linux/x86_64) platform=linux-x86_64-gnu ;;
           *) echo 'No release binary for this runner.' >&2; exit 125 ;;
         esac
-        version=0.4.0
+        version=0.5.2
         archive="veil-tell-$version-$platform.tar.gz"
         install_dir="$RUNNER_TEMP/veil-tell"
         mkdir -p "$install_dir/bin"
