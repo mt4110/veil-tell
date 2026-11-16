@@ -218,8 +218,164 @@ def test_manager(cli, tool, manager):
         print(next(line for line in updated.stderr.splitlines() if "attempted (blocked)" in line), flush=True)
 
 
+def test_corepack(cli, corepack, standalone, node):
+    with tempfile.TemporaryDirectory(prefix="veil-corepack-") as folder:
+        root = Path(folder).resolve()
+        project = root / "project"
+        project.mkdir()
+        home = root / "home"
+        bin_dir = home / "bin"
+        bin_dir.mkdir(parents=True)
+        cache = home / ".cache/node/corepack"
+        (bin_dir / "corepack").symlink_to(corepack)
+        (bin_dir / "pnpm").symlink_to(corepack.with_name("pnpm.js"))
+        shutil.copy2(node, bin_dir / "node")
+        (home / "private-sentinel").write_text("outside the sandbox")
+        env = dict(os.environ, HOME=str(home), COREPACK_HOME=str(cache),
+                   PATH=f"{bin_dir}:{os.environ['PATH']}")
+        env.pop("CI", None)
+
+        def run(*args, env=env, expected=0):
+            result = subprocess.run(args, cwd=project, env=env, text=True, capture_output=True, timeout=30)
+            assert result.returncode == expected, (args, result.stdout, result.stderr)
+            return result
+
+        write_json(project / "package.json", {
+            "name": "test-corepack", "private": True, "packageManager": "pnpm@10.34.9",
+        })
+        (project / "pnpm-workspace.yaml").write_text("storeDir: .pnpm-store\n")
+        cold = run(cli, "pnpm", "install", "--offline", expected=125)
+        assert "failed during the isolated store probe" in cold.stderr, cold.stderr
+        assert "corepack install" in cold.stderr and "storeDir:" not in cold.stderr, cold.stderr
+        assert not (project / "node_modules").exists()
+
+        run("corepack", "install")
+        snapshot = {p.relative_to(cache) for p in cache.rglob("*")}
+        del env["COREPACK_HOME"]
+        env["XDG_CACHE_HOME"] = str(home / ".cache")
+        run(cli, "pnpm", "install", "--offline")
+        run(cli, "corepack", "pnpm", "install", "--offline")
+        assert json.loads((project / ".veil-tell/pnpm.json").read_text())["backend"] == "isolated"
+        run(cli, "corepack", "pnpm", "exec", "/bin/sh", "-c",
+            'test -d "$COREPACK_HOME/v1/pnpm" && ! touch "$COREPACK_HOME/v1/pnpm/probe"')
+        assert {p.relative_to(cache) for p in cache.rglob("*")} == snapshot
+        if sys.platform == "linux":
+            run(cli, "corepack", "pnpm", "exec", "/bin/sh", "-c", 'test ! -e "$1"', "sh",
+                home / "private-sentinel")
+
+        # Exercise a standalone pnpm copied into the home directory outside the workspace.
+        standalone = shutil.copy2(standalone, home / "pnpm")
+        (project / "package.json").write_text('{"name":"test-standalone","private":true}\n')
+        standalone_project = root / "standalone"
+        standalone_project.mkdir()
+        shutil.copy2(project / "package.json", standalone_project)
+        shutil.copy2(project / "pnpm-workspace.yaml", standalone_project)
+        result = subprocess.run([cli, standalone, "install", "--offline"], cwd=standalone_project,
+                                env=env, text=True, capture_output=True, timeout=30)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        print(f"{sys.platform} corepack cold=125 cached_shim=0 explicit=0 home_pnpm=0", flush=True)
+
+
+def test_install_home_and_accept(cli, npm, node):
+    with tempfile.TemporaryDirectory(prefix="veil-install-") as folder:
+        root = Path(folder).resolve()
+        project = root / "project"
+        project.mkdir()
+        tools = project / "tools"
+        tools.mkdir()
+        shutil.copy2(node, tools / "node")
+        shutil.copytree(npm.parent.parent, tools / "npm-package")
+        (tools / "npm").symlink_to(tools / "npm-package/bin/npm-cli.js")
+        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}",
+                   NPM_CONFIG_PREFIX=str(root / "unused-prefix"))
+        env.pop("CI", None)
+        env.pop("VEIL_TELL_PROJECT_HOME", None)
+
+        def run(*args, env=env, expected=0):
+            result = subprocess.run(args, cwd=project, env=env, text=True, capture_output=True, timeout=30)
+            assert result.returncode == expected, (args, result.stdout, result.stderr)
+            return result
+
+        (project / "package.json").write_text(json.dumps({
+            "name": "install-home-fixture", "version": "1.0.0", "private": True,
+            "scripts": {"postinstall": "node install.cjs"},
+        }))
+        script = project / "install.cjs"
+        script.write_text("""
+const {writeFileSync} = require('node:fs');
+const {homedir} = require('node:os');
+const {join} = require('node:path');
+writeFileSync(join(homedir(), 'fixture-program'), '#!/bin/sh\\nprintf "ready"\\n', {mode: 0o700});
+""")
+        command = ["npm", "install", "--offline", "--no-audit", "--no-fund"]
+        host_home = root / "home"
+        host_home.mkdir()
+        native = dict(env, HOME=str(host_home))
+        run(cli, *command, env=native)
+        assert not (host_home / "fixture-program").exists()
+        project_home = project / ".veil-home"
+        project_home.symlink_to(host_home)
+        persistent = dict(native, VEIL_TELL_PROJECT_HOME=project_home.name)
+        run(cli, *command, env=persistent, expected=125)
+        assert not (host_home / "fixture-program").exists()
+        project_home.rename(project / "invalid-home-link")
+        run(cli, *command, env=persistent)
+        assert project_home.stat().st_mode & 0o077 == 0
+        assert run(project_home / "fixture-program").stdout == "ready"
+
+        baseline = project / ".veil-tell/npm.json"
+        pending = baseline.with_name("pending.json")
+        original = baseline.read_bytes()
+        external = root / "baseline.json"
+        external.write_bytes(original)
+        script.write_text(script.read_text() + """
+const {lookup} = require('node:dns');
+lookup('new-install-host.invalid', error => {
+  if (error?.code !== 'ENOTFOUND') process.exitCode = 1;
+});
+try {
+  writeFileSync('.veil-tell/pending.json', 'forged');
+  process.exitCode = 2;
+} catch (error) {
+  if (!['EACCES', 'EPERM', 'EROFS'].includes(error.code)) throw error;
+}
+""")
+        # Explicit CI inputs retain a read-only review workflow.
+        explicit = run(cli, "ci", "--baseline", external, "--json", "--", *command,
+                       env=persistent, expected=21)
+        assert explicit.stdout and external.read_bytes() == original
+        assert not pending.exists() and baseline.read_bytes() == original
+        for args, run_env in [
+            (["ci", "--json", "--", *command], persistent),
+            (["--json", *command], dict(persistent, CI="true")),
+        ]:
+            changed = run(cli, *args, env=run_env, expected=21)
+            report = json.loads(changed.stdout)
+            assert report["child_status"]["exit_code"] == 0, report
+            assert "veil-tell accept" in changed.stderr and "attribution is off" not in changed.stderr
+            entry, = report["comparison"]["attempted_added"]
+            source, = entry["attribution"]
+            assert source["package"]["name"] == "install-home-fixture", source
+            assert baseline.read_bytes() == original
+            assert json.loads(pending.read_text())["key"] == "npm"
+            run(cli, "accept", env=run_env)
+            assert not pending.exists()
+            run(cli, *args, env=run_env)
+            baseline.write_bytes(original)
+        print(f"{sys.platform} persistent_home=0 unsafe_home=125 npm_prefix=attributed ci=21/accept=0/ci=0",
+              flush=True)
+
+
 if __name__ == "__main__":
     cli = Path(sys.argv[1]).resolve()
-    for argument in sys.argv[2:]:
-        name, path = argument.split("=", 1)
-        test_manager(cli, Path(path).absolute(), name)
+    tools = [(name, Path(path).absolute()) for name, path in (arg.split("=", 1) for arg in sys.argv[2:])]
+    if compatibility := [path for name, path in tools if name == "corepack"]:
+        corepack, = compatibility
+        node = next(path for name, path in tools if name == "node")
+        npm = next(path for name, path in tools if name == "npm").resolve()
+        standalone = next(path for name, path in tools if name == "standalone")
+        test_corepack(cli, corepack, standalone, node)
+        test_install_home_and_accept(cli, npm, node)
+    for name, path in tools:
+        if name not in ("corepack", "node", "standalone"):
+            test_manager(cli, path, name)

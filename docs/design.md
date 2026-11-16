@@ -398,7 +398,7 @@ pip を対象にするなら、PEP 517 のビルドバックエンド用プロ�
 
 導入に詰まった箇所が共通なら、その箇所に絞って直す。実行に成功しても次の更新で使われなければ、理由を聞いて対象や価値の仮説を見直す。
 
-## 次版 0.5.0 の設計判断
+## 0.5.0 の設計判断
 
 0.4.1 ではなく 0.5.0 とする。既存の隔離方式に加え、短い CI 実行と明示的な観測比較の終了判定を利用者から見える形で拡張するため。JSON は v1 を維持する。`20` は restrict の未登録 CONNECT、`21` は比較で検出した新規宛先・観測した DNS 試行と、明示的な観測比較の送信量異常、`22` は上限による遮断、`125` は検査不能・記録不完全に使う。観測だけの `21` と切断の `22` は `run_status.reason` と `volume_anomalies[].blocked` で区別する。
 
@@ -413,3 +413,18 @@ pip を対象にするなら、PEP 517 のビルドバックエンド用プロ�
 - StepSecurity Harden-Runner は CI の宛先を監査・制限し、実行履歴の基準で新規宛先を検出する。Anthropic Sandbox Runtime は OS 隔離・プロキシの許可リスト・違反記録を持ち、macOS では `trustd` を許す場合の持ち出しリスクも明記する。veil-tell のこの版では、コマンド単位で Git 管理する基準と、推定帰属付きの比較結果に焦点を置く。[Harden-Runner](https://www.stepsecurity.io/blog/railway-security-incident-ci-cd-runtime-security) · [Sandbox Runtime](https://github.com/anthropics/sandbox-runtime)
 - Socket は依存更新 PR にパッケージのリスク情報を出す。OpenSnitch、LuLu、Little Snitch は端末上のアプリの接続を扱う。veil-tell の記録は起動したコマンドの実測に依存し、ホスト全体の監視を行わない。[Socket for GitHub](https://docs.socket.dev/docs/socket-for-github) · [OpenSnitch](https://github.com/evilsocket/opensnitch) · [LuLu](https://objective-see.org/products/lulu.html) · [Little Snitch](https://obdev.at/products/littlesnitch/index.html)
 - 転送せず NXDOMAIN を返す構成は CoreDNS の `template` と `log` でも組める。今回の論点はリゾルバの新規性より、既存の非特権隔離内に受付を置けるかどうか。Zeek の `conn.log` は方向別バイト数を記録する。veil-tell の比較対象は個々の許可済み CONNECT の暗号化トンネルで、基準または TOML の上限でそのトンネルを打ち切る。[CoreDNS template](https://coredns.io/plugins/template/) · [CoreDNS log](https://coredns.io/plugins/log/) · [Zeek conn.log](https://docs.zeek.org/en/current/logs/conn.html)
+
+## ロードマップ
+
+**現在地：0.5.1**
+
+0.5.1 では、隔離内外で同じプロジェクト内の pnpm ストアを使う。実効的な `storeDir` が確認できなければ `node_modules` に触る前に終了コード `125` で止める。
+
+### 0.5.x で直す互換性の問題
+
+- Puppeteer がダウンロードした Chrome が一時ホームに入り、インストール終了時に消える。
+- Corepack の shim やホーム下に入れた pnpm が隔離内で起動できず、ストア設定のエラーとして表示される。
+- CI が新規宛先で `21` を返す際に承認候補が残らず、直後の `veil-tell accept` が `125` になる。README に承認手順を載せる。
+- `NPM_CONFIG_PREFIX` を設定しただけで npm ライフサイクルの通信帰属が無効になり、カスタムシェルを使っているかのように表示される。
+
+完了条件は、Puppeteer のようにホームへダウンロードするパッケージが隔離インストール後も成果物を使えること、準備済みの pnpm が起動し起動失敗時には原因が分かること、プロジェクトの基準を使った CI でレビュー後に `accept` が通ること、prefix 設定があっても通信の推定帰属が残ること。pnpm のストア事前確認と隔離による通信制限も回帰試験で確認する。

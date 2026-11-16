@@ -28,6 +28,10 @@ pub struct Options {
 }
 
 impl Options {
+    pub fn writes_pending(&self) -> bool {
+        self.automatic || (self.ci && self.input.is_none())
+    }
+
     pub fn requested(&self) -> bool {
         self.input.is_some()
             || self.output.is_some()
@@ -368,7 +372,7 @@ impl Comparison {
         } else if self.status == "skipped" {
             "fix the run and repeat the command / 実行を直して同じコマンドを再実行"
         } else if self.has_new() {
-            "review the new destinations in this report / レポートの新規宛先を調査"
+            "review the new destinations; to prepare a project approval, repeat locally against the project baseline / 新規宛先を調査し、承認候補を作る場合はプロジェクトの基準を使ってローカルで再実行"
         } else {
             "repeat the same check after the next dependency update / 次の依存更新後に同じチェックを実行"
         };
@@ -491,7 +495,7 @@ impl Session {
         let state = cwd.join(".veil-tell");
         let manager =
             crate::manager::executable(command).filter(|name| crate::manager::NAMES.contains(name));
-        let key = if options.ci {
+        let mut key = if options.ci {
             manager
         } else {
             crate::manager::install_key(command)
@@ -512,8 +516,10 @@ impl Session {
             }
             let current = optional_baseline(&default)?;
             if current.is_none() && crate::manager::NAMES.contains(&key.as_str()) {
-                let exact = baseline_path(&state, &command_key(command));
+                let exact_key = command_key(command);
+                let exact = baseline_path(&state, &exact_key);
                 if exact.is_file() && options.ci {
+                    key = exact_key;
                     Some(baseline(&exact)?)
                 } else if exact.is_file() {
                     let _guard = lock(&state)?;
@@ -547,10 +553,7 @@ impl Session {
             ));
         }
         use crate::lockfile::{Ecosystem, Summary};
-        let executable = command
-            .first()
-            .and_then(|arg| Path::new(arg).file_name())
-            .and_then(|s| s.to_str());
+        let executable = crate::manager::executable(command);
         let ecosystem = match executable {
             Some("cargo") => Some(Ecosystem::Cargo),
             Some("npm") => Some(Ecosystem::Npm),
@@ -567,6 +570,7 @@ impl Session {
         let ecosystem = ecosystem.filter(|_| !options.no_attribute);
         let initial_lock = ecosystem.and_then(|kind| Summary::read(cwd, kind));
         if options.ci
+            && options.input.is_some()
             && let Some(root) = std::env::var_os("VEIL_TELL_PR_BASE_LOCK_DIR")
             && let Some(before) = &mut before
         {
@@ -584,7 +588,7 @@ impl Session {
             ecosystem,
             ci: options.ci,
             initial_lock,
-            automatic: options.automatic.then_some((state, key)),
+            automatic: options.writes_pending().then_some((state, key)),
         })
     }
 
@@ -676,10 +680,10 @@ impl Session {
                         .map(|e| (e.host.clone(), e.clone()))
                         .collect();
                     current.attempted = attempts.into_values().collect();
-                    current.validate()?;
                     current
                         .destinations
                         .sort_by(|a, b| (&a.host, a.port).cmp(&(&b.host, b.port)));
+                    current.validate()?;
                     replace(
                         &state.join("pending.json"),
                         &Pending {

@@ -12,6 +12,29 @@ veil-tell ci -- npm ci
 
 GitHub Actions で依存更新を検査する場合は、[npm 用テンプレート](examples/github-actions/veil-tell-npm.yml) を自分のリポジトリの `.github/workflows/veil-tell-npm.yml` にコピーします。既定ブランチで **Check npm destinations** を手動実行し、成果物の `npm.json` をレビューして `.veil-tell/npm.json` としてコミットします。次の依存更新 PR から、変更前の基準で `npm ci` を検査します。GitHub 上での導入にローカルの veil-tell は不要です。 [導入手順](docs/runbook.md#10-npm-の依存更新-pr-に導入する)
 
+### CI で新しい宛先が見つかったら
+
+プロジェクトの基準を使う `veil-tell ci -- npm ci` または `CI=true veil-tell npm ci` が新規 CONNECT や名前解決の試みで `21` を返すと、`.veil-tell/pending.json` に承認候補を保存します。出力された宛先と用途を確認し、承認する場合は同じプロジェクトのルートで実行します。
+
+```sh
+veil-tell accept
+git diff -- .veil-tell/npm.json
+veil-tell ci -- npm ci
+```
+
+レビュー済みの基準をコミットし、`.veil-tell/pending.json` は Git 管理から除外します。GitHub Action や `ci --baseline FILE` の結果を承認する場合は、同じ依存関係と比較元の基準を用意したローカル環境で、上のプロジェクト基準を使う手順を実行してください。
+
+### インストール時にホームへ置くファイルを残す
+
+隔離中のホームは既定で一時ディレクトリです。ブラウザーなどを後から使うプロジェクトでは、`VEIL_TELL_PROJECT_HOME` にプロジェクト内の相対パスを指定すると、隔離の終了後もダウンロードを使えます。例えば、Puppeteer を依存に含むプロジェクトのルートで実行します。
+
+```sh
+VEIL_TELL_PROJECT_HOME=.veil-home veil-tell npm ci
+PUPPETEER_CACHE_DIR="$PWD/.veil-home/.cache/puppeteer" node app.js
+```
+
+`.veil-home/` は Git 管理から外します。アプリから別のホームが必要な場合は、実行時に `HOME="$PWD/.veil-home"` を指定できます。Puppeteer がブラウザーの取得に `proxy-agent` を必要とするバージョンでは、対応するバージョンを依存に追加してください。Linux 環境で `unzip` がない場合は、Puppeteer が対応する `yauzl` で展開できます。使用する npm や pnpm がインストールスクリプトを承認制にしている場合は、Puppeteer のスクリプトをレビューして許可します。[Puppeteer の設定](https://pptr.dev/guides/configuration)
+
 ### 公開版 v0.4.0 の GitHub Actions 実測
 
 `uses: mt4110/veil-tell@v0` を macOS 26 と Ubuntu 26.04 で実行し、**変更なしは `0`、新規宛先の拒否は `21`、送信量超過による切断は `22`** を確認しました。両 OS で、送信量超過時は受信ログと JSON が **131,072 バイト**で一致しました。 [macOS の実行](https://github.com/mt4110/veil-tell/actions/runs/43459261848) · [Ubuntu の実行](https://github.com/mt4110/veil-tell/actions/runs/43410515308) · [ジョブ要約・JSON・受信ログの読み方](docs/runbook.md#8-公開版-v040-の-github-actions-実測)
@@ -93,6 +116,8 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 | curl・Python・Go・Rust のシステムリゾルバ、IP 直打ち | 直接通信の試行先・件数は未観測 | 直接通信の試行先・件数は未観測 |
 
 `CI=true veil-tell npm install` は隔離と既存の基準を使い、新規 CONNECT や観測できた新規名前解決の試行で `21` を返します。ローカルの短い形式は観測した試行だけを理由に失敗させません。明示的な `observe --baseline FILE` は送信量の異常を記録して `21` を返し、制限による切断は `22` を返します。少量ずつの送信や実行をまたぐ累計は比較範囲外です。
+
+Corepack を使う場合は、先にプロジェクトのルートで `corepack install` を実行して `packageManager` の pnpm を取得します。その後は `veil-tell pnpm install` と `veil-tell corepack pnpm install` がキャッシュ済みの実行ファイルを使います。pnpm をホームに入れた場合は、インストール済みの実行ファイルと Node.js が PATH から見えるようにします。
 
 macOS の隔離で pnpm 12.4.x の TLS 検証エラーが出る場合は、実測で通った pnpm 12.21.0 以降を使ってください。[原因と実測](docs/destination-diff.md#pnpm-12-の-macos-tls-とバージョン別の回帰試験)
 

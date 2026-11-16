@@ -1,4 +1,6 @@
-use super::{Launch, NODE_DNS_HOOK, restricted_env, set_proxy, shell_exit, supervise_stdio};
+use super::{
+    Launch, LaunchConfig, NODE_DNS_HOOK, restricted_env, set_proxy, shell_exit, supervise_stdio,
+};
 use crate::{Result, error, proxy::Listener};
 use std::ffi::OsString;
 use std::io;
@@ -13,15 +15,28 @@ use tokio::time::timeout;
 const RELAY_SOCKET: &str = "/veil-tell-proxy.sock";
 const DNS_HOOK: &str = "/veil-tell-node-dns.cjs";
 const RELAY_PROGRAM: &str = "/veil-tell-relay";
+const SYSTEM_DIRS: &[&str] = &["/usr", "/bin", "/lib", "/lib64", "/nix/store"];
+const COREPACK_CACHE: &str = "/veil-tell-corepack";
+
+fn runtime_visible(path: &Path, cwd: &Path) -> bool {
+    path.starts_with(cwd) || SYSTEM_DIRS.iter().any(|dir| path.starts_with(dir))
+}
+
+fn expose_tool(launch: &mut Command, cwd: &Path, entry: &Path, target: &Path) {
+    if !runtime_visible(target, cwd) {
+        launch.arg("--ro-bind").arg(target).arg(target);
+    }
+    if entry != target && !runtime_visible(entry, cwd) {
+        launch.arg("--symlink").arg(target).arg(entry);
+    }
+}
 
 pub async fn prepare(
     command: &[OsString],
     cwd: &Path,
     secret: &str,
-    attribute_npm: bool,
-    attribute_cargo: bool,
     protected_dirs: &[&Path],
-    (node_manager, node_attribution): (Option<&str>, bool),
+    config: LaunchConfig<'_>,
 ) -> Result<Launch> {
     let bwrap = std::env::var_os("VEIL_TELL_BWRAP")
         .map(PathBuf::from)
@@ -66,7 +81,7 @@ pub async fn prepare(
         "--dir",
         "/tmp/veil-tell-home",
     ]);
-    for dir in ["/usr", "/bin", "/lib", "/lib64", "/nix/store"] {
+    for &dir in SYSTEM_DIRS {
         if Path::new(dir).is_dir() {
             launch.args(["--ro-bind", dir, dir]);
         }
@@ -87,7 +102,7 @@ pub async fn prepare(
             launch.arg("--setenv").arg(key).arg(value);
         }
     }
-    if attribute_npm {
+    if config.npm {
         let wrapper = temporary.path().join("npm-shell");
         crate::attribution::create_shell(&wrapper, Path::new(RELAY_PROGRAM))?;
         launch
@@ -96,7 +111,7 @@ pub async fn prepare(
             .arg(crate::attribution::LINUX_SHELL);
         launch.args(["--setenv", "VEIL_TELL_RELAY_NPM", "1"]);
     }
-    if attribute_cargo {
+    if config.cargo {
         let wrapper = temporary.path().join("rustc-wrapper");
         crate::attribution::create_wrapper(
             &wrapper,
@@ -109,9 +124,9 @@ pub async fn prepare(
             .arg(crate::cargo_attribution::LINUX_WRAPPER);
         launch.args(["--setenv", "VEIL_TELL_RELAY_CARGO", "1"]);
     }
-    if let Some(manager) = node_manager {
+    if let Some(manager) = config.node_manager {
         launch.args(["--setenv", "VEIL_TELL_NODE_MANAGER", manager]);
-        if node_attribution {
+        if config.node_attribution {
             launch.args(["--setenv", "VEIL_TELL_NODE_ATTRIBUTION", "1"]);
         }
     }
@@ -124,6 +139,37 @@ pub async fn prepare(
         .filter(|path| path.is_dir() && path.starts_with(cwd))
     {
         launch.arg("--ro-bind").arg(path).arg(path);
+    }
+    if let Some(home) = config.project_home {
+        launch.args(["--setenv", "VEIL_TELL_RELAY_HOME"]).arg(home);
+    }
+    if let Some(runtime) = config.pnpm_runtime {
+        expose_tool(&mut launch, cwd, &runtime.path_entry, &runtime.program);
+        for path in runtime.support_files() {
+            if !runtime_visible(&path, cwd) {
+                launch.arg("--ro-bind").arg(&path).arg(&path);
+            }
+        }
+        if let Some((entry, node)) = &runtime.node {
+            expose_tool(&mut launch, cwd, entry, node);
+        }
+        if runtime.corepack {
+            launch.args(["--setenv", "VEIL_TELL_RELAY_COREPACK", "1"]);
+        }
+        if let Some(cache) = &runtime.corepack_cache {
+            launch
+                .arg("--ro-bind")
+                .arg(cache.join("v1/pnpm"))
+                .arg(format!("{COREPACK_CACHE}/v1/pnpm"));
+            let known_good = cache.join("lastKnownGood.json");
+            if known_good.symlink_metadata().is_ok_and(|m| m.is_file()) {
+                launch
+                    .arg("--ro-bind")
+                    .arg(known_good)
+                    .arg(format!("{COREPACK_CACHE}/lastKnownGood.json"));
+            }
+            launch.args(["--setenv", "VEIL_TELL_RELAY_COREPACK_CACHE", COREPACK_CACHE]);
+        }
     }
     launch
         .arg("--ro-bind")
@@ -155,7 +201,14 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
     drop(ready);
     let mut command = Command::new(&args[0]);
     command.args(&args[1..]).kill_on_drop(true);
-    restricted_env(&mut command, Path::new("/tmp/veil-tell-home"));
+    let home = std::env::var_os("VEIL_TELL_RELAY_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "/tmp/veil-tell-home".into());
+    restricted_env(&mut command, &home);
+    if std::env::var_os("VEIL_TELL_RELAY_COREPACK").is_some() {
+        let cache = std::env::var_os("VEIL_TELL_RELAY_COREPACK_CACHE");
+        crate::pnpm::configure_corepack(&mut command, cache.as_deref().map(Path::new));
+    }
     let port = listener.local_addr()?.port();
     set_proxy(&mut command, port, secret);
     super::configure_node_dns(&mut command, Path::new(DNS_HOOK), port, secret, true)?;

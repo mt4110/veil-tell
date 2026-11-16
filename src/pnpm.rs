@@ -1,9 +1,9 @@
 use crate::{Result, cli::Backend, isolation, manager};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::OpenOptions;
 use std::io::Read;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
@@ -26,6 +26,135 @@ fn setup_error(reason: impl Into<String>, next: &'static str) -> StoreError {
         reason: reason.into(),
         next,
     }
+}
+
+pub struct Runtime {
+    #[cfg(target_os = "linux")]
+    pub program: PathBuf,
+    pub corepack: bool,
+    pub corepack_cache: Option<PathBuf>,
+    pub path_entry: PathBuf,
+    #[cfg(target_os = "linux")]
+    pub node: Option<(PathBuf, PathBuf)>,
+}
+
+impl Runtime {
+    pub fn find(command: &[OsString], cwd: &Path) -> Result<Self> {
+        let (entry, program) = find_executable(&command[0], cwd).ok_or_else(|| {
+            setup_error(
+                "pnpm launcher was not found or is not executable / pnpm の起動ファイルが見つからないか実行できません",
+                "put an installed pnpm or Corepack shim on PATH / インストール済みの pnpm または Corepack の shim を PATH に置いてください",
+            )
+        })?;
+        let corepack = manager::corepack_pnpm(command)
+            || (program.ends_with("dist/pnpm.js")
+                && program.with_file_name("lib").join("corepack.cjs").is_file());
+        Ok(Self {
+            #[cfg(target_os = "linux")]
+            program,
+            corepack,
+            corepack_cache: corepack.then(|| corepack_cache(cwd)).flatten(),
+            path_entry: entry,
+            #[cfg(target_os = "linux")]
+            node: find_executable(OsStr::new("node"), cwd),
+        })
+    }
+
+    pub fn command(&self, command: &[OsString]) -> Vec<OsString> {
+        std::iter::once(self.path_entry.clone().into_os_string())
+            .chain(command[1..].iter().cloned())
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn support_files(&self) -> Vec<PathBuf> {
+        let Some(directory) = self.program.parent() else {
+            return Vec::new();
+        };
+        if self.corepack
+            && directory.ends_with("dist")
+            && directory.join("lib/corepack.cjs").is_file()
+        {
+            let mut files = vec![directory.to_path_buf()];
+            if let Some(root) = directory.parent() {
+                let manifest = root.join("package.json");
+                if manifest
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.is_file())
+                {
+                    files.push(manifest);
+                }
+            }
+            return files;
+        }
+        if matches!(
+            self.program.file_name().and_then(OsStr::to_str),
+            Some("pnpm.cjs" | "pnpm.js")
+        ) && directory.ends_with("bin")
+            && let Some(root) = directory.parent()
+            && root.join("dist/pnpm.cjs").is_file()
+        {
+            return [root.join("dist"), root.join("package.json")]
+                .into_iter()
+                .filter(|path| {
+                    path.symlink_metadata()
+                        .is_ok_and(|metadata| !metadata.is_symlink())
+                })
+                .collect();
+        }
+        Vec::new()
+    }
+}
+
+pub fn configure_corepack(command: &mut tokio::process::Command, cache: Option<&Path>) {
+    command
+        .env("COREPACK_ENABLE_NETWORK", "0")
+        .env("COREPACK_DEFAULT_TO_LATEST", "0")
+        .env("COREPACK_ENV_FILE", "0");
+    if let Some(cache) = cache {
+        command.env("COREPACK_HOME", cache);
+    }
+}
+
+fn find_executable(program: &OsStr, cwd: &Path) -> Option<(PathBuf, PathBuf)> {
+    let path = Path::new(program);
+    let resolve = |entry: PathBuf| {
+        let entry = cwd.join(entry);
+        let resolved = entry.canonicalize().ok()?;
+        let metadata = resolved.metadata().ok()?;
+        (metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .then_some((entry, resolved))
+    };
+    if path.as_os_str().as_encoded_bytes().contains(&b'/') {
+        return resolve(path.into());
+    }
+    let path = std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+    std::env::split_paths(&path).find_map(|entry| resolve(entry.join(program)))
+}
+
+fn corepack_cache(cwd: &Path) -> Option<PathBuf> {
+    let cache = std::env::var_os("COREPACK_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            let base = std::env::var_os("XDG_CACHE_HOME")
+                .or_else(|| std::env::var_os("LOCALAPPDATA"))
+                .map(PathBuf::from)
+                .or_else(|| {
+                    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache"))
+                })?;
+            Some(base.join("node/corepack"))
+        })?;
+    let cache = cwd.join(cache).canonicalize().ok()?;
+    (cache
+        .join("v1")
+        .symlink_metadata()
+        .is_ok_and(|m| m.is_dir())
+        && cache
+            .join("v1/pnpm")
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_dir())
+        && !cwd.starts_with(&cache))
+    .then_some(cache)
 }
 
 const CONFIGURE: &str = "set `storeDir: .pnpm-store` in pnpm-workspace.yaml / pnpm-workspace.yaml に `storeDir: .pnpm-store` を設定";
@@ -152,13 +281,14 @@ pub async fn validate_store(
     outputs: &[&Path],
     protected_dirs: &[&Path],
     secret: &str,
+    runtime: &Runtime,
+    project_home: Option<&Path>,
 ) -> Result<()> {
     if !changes_modules(command) {
         return Ok(());
     }
-    if command
+    if manager::args(command)
         .iter()
-        .skip(1)
         .any(|arg| arg.to_str().is_some_and(changes_store_or_root))
     {
         return Err(setup_error(
@@ -187,13 +317,22 @@ pub async fn validate_store(
     // A store path alone can match by accident on Linux: the workspace
     // is a mount point and pnpm 9 may default to its .pnpm-store directory
     // while ignoring storeDir in YAML. Require an effective explicit setting.
-    let probe = [
-        "/bin/sh".into(),
-        "-c".into(),
-        r#""$1" config get store-dir && exec "$1" store path"#.into(),
-        "veil-tell-pnpm-store".into(),
-        command[0].clone(),
-    ];
+    let probe: Vec<OsString> = [
+        "/bin/sh",
+        "-c",
+        r#""$@" config get store-dir && exec "$@" store path"#,
+        "veil-tell-pnpm-store",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .chain(runtime.command(
+        &command[..if manager::corepack_pnpm(command) {
+            2
+        } else {
+            1
+        }],
+    ))
+    .collect();
     let mut launch = isolation::prepare(
         Backend::Isolated,
         &probe,
@@ -201,16 +340,45 @@ pub async fn validate_store(
         outputs,
         protected_dirs,
         secret,
-        isolation::AttributionConfig::default(),
+        isolation::LaunchConfig {
+            project_home,
+            pnpm_runtime: Some(runtime),
+            ..Default::default()
+        },
     )
     .await?;
-    let resolved = tokio::time::timeout(Duration::from_secs(5), launch.command.output())
+    let output = tokio::time::timeout(Duration::from_secs(5), launch.command.output())
         .await
-        .ok()
-        .and_then(std::result::Result::ok)
-        .filter(|output| output.status.success())
-        .and_then(|output| String::from_utf8(output.stdout).ok());
-    let matches = resolved.as_deref().is_some_and(|output| {
+        .map_err(|_| setup_error(
+            "pnpm store probe timed out inside isolation / 隔離内で pnpm の起動確認がタイムアウトしました",
+            "check that the installed pnpm starts offline / pnpm がオフラインで起動できるか確認",
+        ))??;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).replace(secret, "[redacted]");
+        let detail = detail
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .take(8)
+            .map(|line| {
+                line.chars()
+                    .filter(|c| !c.is_control())
+                    .take(240)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let next = if runtime.corepack && detail.contains("Network access disabled") {
+            "run corepack install in the workspace outside isolation to cache the pinned pnpm / 隔離の外で corepack install を実行し、指定バージョンをキャッシュ"
+        } else {
+            "check the pnpm launcher, Node.js and the error above / pnpm の起動ファイル、Node.js、上のエラーを確認"
+        };
+        return Err(setup_error(
+            format!("pnpm failed during the isolated store probe ({}) / 隔離内の pnpm 起動確認に失敗\n{detail}", output.status),
+            next,
+        ).into());
+    }
+    let resolved = std::str::from_utf8(&output.stdout).ok();
+    let matches = resolved.is_some_and(|output| {
         let mut lines = output.lines();
         let (Some(setting), Some(path), None) = (lines.next(), lines.next(), lines.next()) else {
             return false;

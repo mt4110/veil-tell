@@ -100,7 +100,7 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u
         cwd: &cwd,
         timeout: None,
         protected_outputs: &[],
-        protected_dirs: if options.comparison.automatic {
+        protected_dirs: if options.comparison.automatic || options.comparison.ci {
             &[state.as_path()]
         } else {
             &[]
@@ -191,11 +191,34 @@ async fn run_command(
         ));
     }
     let secret = credential()?;
-    if options.backend == Backend::Isolated {
-        isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
-        pnpm::validate_store(&options.command, cwd, &outputs, protected_dirs, &secret).await?;
-    }
     let executable = manager::executable(&options.command);
+    let (project_home, pnpm_runtime) = if options.backend == Backend::Isolated {
+        isolation::check_isolated_paths(cwd, options.policy.as_deref(), &outputs)?;
+        let project_home = isolation::project_home(cwd, protected_dirs)?;
+        let runtime = if executable == Some("pnpm") {
+            Some(pnpm::Runtime::find(&options.command, cwd)?)
+        } else {
+            None
+        };
+        if let Some(runtime) = &runtime {
+            pnpm::validate_store(
+                &options.command,
+                cwd,
+                &outputs,
+                protected_dirs,
+                &secret,
+                runtime,
+                project_home.as_deref(),
+            )
+            .await?;
+        }
+        (project_home, runtime)
+    } else {
+        (None, None)
+    };
+    let command = pnpm_runtime
+        .as_ref()
+        .map(|runtime| runtime.command(&options.command));
     let node_manager = match executable {
         Some("pnpm") => Some("pnpm"),
         Some("yarn") => Some("yarn"),
@@ -203,10 +226,16 @@ async fn run_command(
     };
     let wants_npm = !options.no_attribute
         && (options.attribute_npm || executable.is_some_and(|name| name == "npm"));
-    let custom_shell = wants_npm && attribution::custom_npm_shell(cwd, &options.command);
+    let custom_shell = wants_npm
+        && attribution::custom_npm_shell(
+            cwd,
+            &options.command,
+            options.backend,
+            project_home.as_deref(),
+        );
     if custom_shell {
         eprintln!(
-            "veil-tell: using the configured npm script-shell; npm attribution is off / npm の既存シェル設定を使用するため帰属を無効化しました"
+            "veil-tell: npm shell configuration can bypass the attribution wrapper; npm attribution is off / npm の設定で帰属ラッパーが迂回される可能性があるため、帰属を無効化しました"
         );
     }
     let attribute_npm = wants_npm && !custom_shell;
@@ -266,16 +295,18 @@ async fn run_command(
         npm_wrapper: _npm_wrapper,
     } = isolation::prepare(
         options.backend,
-        &options.command,
+        command.as_deref().unwrap_or(&options.command),
         cwd,
         &outputs,
         protected_dirs,
         &secret,
-        isolation::AttributionConfig {
+        isolation::LaunchConfig {
             npm: attribute_npm,
             cargo: attribute_cargo,
             node_manager,
             node_attribution: attribute_node,
+            project_home: project_home.as_deref(),
+            pnpm_runtime: pnpm_runtime.as_ref(),
         },
     )
     .await?;
@@ -577,7 +608,7 @@ async fn run_command(
             }
         }
         diff.display(
-            options.comparison.automatic,
+            options.comparison.writes_pending(),
             !result.volume_anomalies.is_empty(),
             install_hint,
         );
