@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.5.2 (unreleased)
+## 0.5.2
 
 - Support an opt-in workspace home for install-time downloads that must survive isolation.
 - Run cached Corepack pnpm shims and home-installed pnpm toolchains in isolation. Distinguish launcher failures from store configuration errors.
