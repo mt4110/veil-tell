@@ -24,6 +24,10 @@ pub struct Attribution {
     pub confidence: Confidence,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub package: Option<Package>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub manager: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub phase: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -60,6 +64,8 @@ impl Attribution {
         Self {
             confidence: Confidence::Unknown,
             package: None,
+            manager: None,
+            phase: None,
         }
     }
 
@@ -72,10 +78,18 @@ impl Attribution {
             .map_or_else(Self::unknown, |package| Self {
                 confidence: Confidence::Inferred,
                 package: Some(package),
+                manager: None,
+                phase: None,
             })
     }
 
     pub fn valid(&self) -> bool {
+        if self.manager.is_some() || self.phase.is_some() {
+            return self.manager.as_deref() == Some("npm")
+                && self.phase.as_deref() == Some("fetch")
+                && self.package.is_none()
+                && self.confidence == Confidence::Inferred;
+        }
         match (&self.confidence, &self.package) {
             (Confidence::Unknown, None) => true,
             (Confidence::Inferred, Some(package)) => package.valid(),

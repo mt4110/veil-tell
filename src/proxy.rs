@@ -63,6 +63,8 @@ pub struct Proxy {
     pub budgets: std::collections::BTreeMap<String, crate::volume::Budget>,
     pub dns_attempts: Option<std::sync::Mutex<DnsAttempts>>,
     pub incomplete: AtomicBool,
+    pub allow_fake_ip: bool,
+    pub upstream: Option<crate::upstream::Upstream>,
     pub interfaces: Vec<IpAddr>,
     pub fixture: Option<crate::FixtureResolver>,
 }
@@ -133,17 +135,28 @@ pub async fn serve(
         }
     };
     if result.is_ok() {
-        // Account for clients which connected and wrote before the command exited,
-        // but whose connection was still queued in the listener.
-        for _ in 0..MAX_CONNECTIONS {
-            match timeout(Duration::from_millis(20), listener.accept()).await {
-                Ok(Ok(connection)) => dispatch_connection(&mut tasks, &state, connection),
-                Ok(Err(error)) => return Err(error),
-                Err(_) => break,
+        // The child group and its relay have exited. Drain already queued connections
+        // from the nonblocking socket without waiting for future clients.
+        match listener {
+            Listener::Tcp(server) => {
+                let server = server.into_std()?;
+                drain(&mut tasks, &state, || {
+                    let (stream, _) = server.accept()?;
+                    stream.set_nonblocking(true)?;
+                    Ok(Connection::Tcp(TcpStream::from_std(stream)?))
+                })?;
+            }
+            #[cfg(target_os = "linux")]
+            Listener::Unix(server) => {
+                let server = server.into_std()?;
+                drain(&mut tasks, &state, || {
+                    let (stream, _) = server.accept()?;
+                    stream.set_nonblocking(true)?;
+                    Ok(Connection::Unix(tokio::net::UnixStream::from_std(stream)?))
+                })?;
             }
         }
     }
-    drop(listener);
     if timeout(Duration::from_millis(300), async {
         while let Some(result) = tasks.join_next().await {
             if result.is_err() {
@@ -157,6 +170,25 @@ pub async fn serve(
         tasks.shutdown().await;
     }
     result
+}
+
+fn drain(
+    tasks: &mut JoinSet<()>,
+    state: &Arc<Proxy>,
+    mut accept: impl FnMut() -> io::Result<Connection>,
+) -> io::Result<()> {
+    for _ in 0..MAX_CONNECTIONS {
+        match accept() {
+            Ok(connection) => dispatch_connection(tasks, state, connection),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+    // More pending connections than can be accounted for in the bounded drain.
+    if accept().is_ok() {
+        state.incomplete.store(true, Ordering::Relaxed);
+    }
+    Ok(())
 }
 
 fn dispatch_connection(tasks: &mut JoinSet<()>, state: &Arc<Proxy>, connection: Connection) {
@@ -276,12 +308,28 @@ fn parse(bytes: &[u8], auth: &str, attribute_npm: bool, compare_unauthenticated:
     let Some(host) = normalize_host(name) else {
         return bad;
     };
+    let attribution = attribute_npm.then(|| {
+        if !dns
+            && authorized
+            && host == "registry.npmjs.org"
+            && source.as_deref() == Some("manager-npm")
+        {
+            Attribution {
+                confidence: crate::attribution::Confidence::Inferred,
+                package: None,
+                manager: Some("npm".into()),
+                phase: Some("fetch".into()),
+            }
+        } else {
+            Attribution::decode(source.as_deref())
+        }
+    });
     Head::Accept {
         host,
         dns,
         consumed,
         authorized,
-        attribution: attribute_npm.then(|| Attribution::decode(source.as_deref())),
+        attribution,
     }
 }
 
@@ -349,6 +397,8 @@ where
             decision: if allowed { "allow" } else { "deny" },
             reason,
             result: if allowed { "interrupted" } else { "blocked" },
+            resolver_hint: None,
+            via_upstream_proxy: false,
             connected_ip: None,
             attempts: 1,
             sent_bytes: 0,
@@ -373,24 +423,41 @@ where
         exchange.event.result = "volume_blocked";
         return response(&mut stream, "403 Forbidden").await;
     }
-    let addresses = match resolve(state, &exchange.event.host).await {
-        Ok(addresses) => addresses,
-        Err("non_public_destination") => {
-            exchange.event.decision = "deny";
-            exchange.event.reason = "non_public_destination";
-            exchange.event.result = "blocked";
-            return response(&mut stream, "403 Forbidden").await;
+    let route = state
+        .upstream
+        .as_ref()
+        .filter(|u| u.applies(&exchange.event.host));
+    let mut upstream = if let Some(route) = route {
+        exchange.event.via_upstream_proxy = true;
+        match timeout(CONNECT_LIMIT, route.tunnel(&exchange.event.host)).await {
+            Ok(Ok(stream)) => stream,
+            _ => {
+                exchange.event.result = "connect_failed";
+                return response(&mut stream, "502 Bad Gateway").await;
+            }
         }
-        Err(reason) => {
-            exchange.event.result = reason;
+    } else {
+        let addresses = match resolve(state, &exchange.event.host).await {
+            Ok(addresses) => addresses,
+            Err(kind @ ("non_public_destination" | "fake_ip")) => {
+                exchange.event.resolver_hint = (kind == "fake_ip").then_some("fake_ip");
+                exchange.event.decision = "deny";
+                exchange.event.reason = "non_public_destination";
+                exchange.event.result = "blocked";
+                return response(&mut stream, "403 Forbidden").await;
+            }
+            Err(reason) => {
+                exchange.event.result = reason;
+                return response(&mut stream, "502 Bad Gateway").await;
+            }
+        };
+        let Ok(Ok((upstream, address))) = timeout(CONNECT_LIMIT, connect(addresses)).await else {
+            exchange.event.result = "connect_failed";
             return response(&mut stream, "502 Bad Gateway").await;
-        }
+        };
+        exchange.event.connected_ip = Some(address.ip());
+        upstream
     };
-    let Ok(Ok((mut upstream, address))) = timeout(CONNECT_LIMIT, connect(addresses)).await else {
-        exchange.event.result = "connect_failed";
-        return response(&mut stream, "502 Bad Gateway").await;
-    };
-    exchange.event.connected_ip = Some(address.ip());
     timeout(
         CONNECT_LIMIT,
         stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n"),
@@ -444,16 +511,31 @@ async fn resolve(state: &Proxy, host: &str) -> std::result::Result<Vec<SocketAdd
         .map_err(|_| "dns_timeout")?
         .map_err(|_| "dns_failed")?
         .collect();
+    classify(&addresses, &state.interfaces, state.allow_fake_ip)?;
+    Ok(addresses)
+}
+
+fn classify(
+    addresses: &[SocketAddr],
+    interfaces: &[IpAddr],
+    allow_fake: bool,
+) -> std::result::Result<(), &'static str> {
     if addresses.is_empty() {
         return Err("dns_failed");
     }
-    if addresses
-        .iter()
-        .any(|address| !public(address.ip()) || state.interfaces.contains(&address.ip()))
-    {
+    if addresses.iter().any(|a| interfaces.contains(&a.ip())) {
         return Err("non_public_destination");
     }
-    Ok(addresses)
+    if addresses
+        .iter()
+        .all(|a| matches!(a.ip(), IpAddr::V4(ip) if matches!(ip.octets(), [198, 18 | 19, ..])))
+    {
+        return if allow_fake { Ok(()) } else { Err("fake_ip") };
+    }
+    if addresses.iter().any(|address| !public(address.ip())) {
+        return Err("non_public_destination");
+    }
+    Ok(())
 }
 
 fn public(ip: IpAddr) -> bool {
@@ -628,5 +710,29 @@ mod tests {
         for address in ["93.184.215.14", "2606:4700:4700::1111"] {
             assert!(public(address.parse().unwrap()), "{address}");
         }
+    }
+}
+
+#[cfg(test)]
+mod fake_ip_tests {
+    use super::*;
+    #[test]
+    fn fake_ip_requires_a_homogeneous_non_local_answer() {
+        let fake: SocketAddr = "198.19.255.255:443".parse().unwrap();
+        let private: SocketAddr = "10.0.0.1:443".parse().unwrap();
+        assert_eq!(classify(&[fake], &[], false), Err("fake_ip"));
+        assert_eq!(classify(&[fake], &[], true), Ok(()));
+        for opt in [false, true] {
+            assert_eq!(
+                classify(&[fake, private], &[], opt),
+                Err("non_public_destination")
+            );
+            assert_eq!(
+                classify(&[fake], &[fake.ip()], opt),
+                Err("non_public_destination")
+            );
+        }
+        assert!(local_name("service.localhost"));
+        assert!(normalize_host("localhost").is_none());
     }
 }

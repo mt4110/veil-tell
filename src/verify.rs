@@ -110,7 +110,7 @@ struct Trials {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Trial {
-    Run(Report),
+    Run(Box<Report>),
     SetupError { error: String },
 }
 
@@ -299,7 +299,7 @@ impl Runner<'_> {
     async fn trial(&mut self, phase: &str, policy: Policy) -> Trial {
         eprintln!("veil-tell verify: {phase}");
         match self.run_trial(policy).await {
-            Ok(report) => Trial::Run(report),
+            Ok(report) => Trial::Run(Box::new(report)),
             Err(error) => {
                 eprintln!("veil-tell verify: {error}");
                 Trial::SetupError {
@@ -325,6 +325,7 @@ impl Runner<'_> {
             attribute_npm: false,
             no_attribute: true,
             json: false,
+            log: false,
             shorthand: false,
             save_baseline: false,
         };

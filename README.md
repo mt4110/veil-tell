@@ -2,6 +2,49 @@
 
 [English](README_EN.md)
 
+## AI エージェントと使う
+
+プロジェクトのシェルで shim を読み込み、Claude Code は `claude`、Codex は `codex`、Cursor CLI は `agent` で起動します。この PATH を継承して起動する npm、curl、git などが veil-tell を通ります。エージェントのターミナルで `command -v npm` を実行すると参照先を確認できます。絶対パス、シェルの別名、エージェント本体の API 通信は shim を通らない場合があります。[Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
+
+```sh
+eval "$(veil-tell agent-env --shell zsh)"
+claude
+# codex
+# agent
+veil-tell log --today --only-blocked
+```
+
+Claude Code の Bash ツールだけに設定する場合は、`SessionStart` の command hook に `veil-tell agent-env --shell bash >> "$CLAUDE_ENV_FILE"` を指定できます。[Claude Code の環境変数フック](https://code.claude.com/docs/en/hooks#persist-environment-variables)
+
+以下は両 OS のシェルで shim を使った実測です。Puppeteer 25.17.0 に対し、レジストリだけをレビューした基準で `CI=true` を指定しました。✓ は CONNECT の許可を示します。バイト数は TLS トンネルで実際に転送した量です。拒否行の 0 B は転送量で、子が送ろうとした総量は分かりません。
+
+macOS 27.2.1 arm64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55682 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+Debian 13 aarch64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55570 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+対応シェルは `--shell bash|zsh|fish` です。fish では `veil-tell agent-env --shell fish | source`、単発の記録には `veil-tell --log COMMAND` を使えます。shim は既定で observe となり、プロジェクトに基準がある依存コマンドには既存の判定を適用します。`veil-tell log --since 2h --only-new --json` は新規宛先の JSON Lines、`veil-tell version` はバージョンを表示します。
+
+veil-tell 自体はテレメトリーを送りません。履歴はローカルの `$XDG_STATE_HOME/veil-tell/log` に保存します。状態ディレクトリの既定値は Linux で `~/.local/state`、macOS で `~/Library/Application Support` です。URL のパス・クエリや既知の資格情報引数は伏せます。自由形式の引数には機密情報が残り得ます。`VEIL_TELL_LOG=off` で履歴を無効にできます。保存期間は30日、1日あたり10 MiBまでです。
+
+### プロキシ・キャッシュでよくある失敗
+
+- Node.js の `fetch` と `https.get` は 22 系では 22.21 から、24 系では 24.5 から両方が環境プロキシに対応します。独自のクライアントエージェントは別の経路を選べます。[Node.js のプロキシ対応](https://nodejs.org/learn/http/enterprise-network-configuration)
+- DNS の解決先がすべて 198.18.0.0/15 なら fake-IP の可能性があります。信頼する TUN 環境だけで `VEIL_TELL_ALLOW_FAKE_IP=1` を指定してください。混在・ローカル宛先は引き続き拒否します。
+- `HTTPS_PROXY` または `https_proxy` が HTTP プロキシなら、許可した CONNECT をそこへ中継します。この経路の名前解決・接続先アドレス検査は上流側が担います。`NO_PROXY` はホスト名・ドメイン接尾辞・任意の `:443`・`*` に対応します。
+- `VEIL_TELL_CACHE=persistent` で、隔離内に専用の `~/.cache/veil-tell/<manager>` を用意します。キャッシュ命中で消えた宛先は情報扱いです。pnpm は従来のプロジェクトストア設定も使います。一時ホームのマネージャーログがあれば、診断に使う既知のエラーコードを `.veil-tell/logs/` に保存します。このディレクトリは Git 管理外にしてください。
+
 ## 使い方
 
 ```sh
@@ -106,14 +149,14 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 
 - **ローカルプロキシに届いた HTTP CONNECT を記録します。** プロキシ方式では直接通信も可能で、その試行先は観測範囲外です。
 - **隔離モードでは Node.js の名前解決の試みも記録します。** `coverage.dns_attempts` が `node_dns_lookup_hook` の場合に限ります。システムリゾルバや IP 直打ちの試みは範囲外です。[詳細](docs/dns-attempts.md)
-- **隔離モードは OS 側で直接通信を制限します。** JSON v1 の `coverage.proxy = "http_connect_requests"` と `coverage.direct_attempt_destinations = "not_observed"` は両モードに共通です。OS が拒否した直接通信や IPC の詳細は JSON に記録されません。
+- **隔離モードは OS 側で直接通信を制限します。** Linux では seccomp 通知が使えると `coverage.direct_attempt_destinations = "ip_port"` になります。未対応なら `not_observed`、記録上限到達時は `incomplete` を返します。
 - **許可したホスト経由の持ち出しは残ります。** 送信量を比較でき、CI または明示的な制限では上限超過でトンネルを閉じます。上限までのデータは届き得ます。 [送信量のしきい値と範囲](docs/volume-limits.md) たとえば、子プロセスが使える認証情報や公開アップロード機能を通じて、許可済みの GitHub や npm レジストリへ秘密情報を送れる場合があります。プロキシは TLS を終端せず、HTTP メソッド、URL パス、本文は観測・制御の範囲外です。ホストの許可は、そのホストへのトンネルを許可します。
 
 | 隔離中の観測 | Linux | macOS |
 | --- | --- | --- |
 | プロキシに届く HTTP CONNECT | ホスト名とポート | ホスト名とポート |
 | 対応する Node.js の名前解決 | ホスト名を記録して拒否 | ホスト名を記録して拒否 |
-| curl・Python・Go・Rust のシステムリゾルバ、IP 直打ち | 直接通信の試行先・件数は未観測 | 直接通信の試行先・件数は未観測 |
+| curl・Python・Go・Rust のシステムリゾルバ、IP 直打ち | 通知時は IP・ポート・件数。DNS 質問名は未観測 | 直接通信の試行先・件数は未観測 |
 
 `CI=true veil-tell npm install` は隔離と既存の基準を使い、新規 CONNECT や観測できた新規名前解決の試行で `21` を返します。ローカルの短い形式は観測した試行だけを理由に失敗させません。明示的な `observe --baseline FILE` は送信量の異常を記録して `21` を返し、制限による切断は `22` を返します。少量ずつの送信や実行をまたぐ累計は比較範囲外です。
 

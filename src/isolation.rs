@@ -16,11 +16,14 @@ pub struct Launch {
     pub command: Command,
     // Retain the private home or Unix socket directory until the session ends.
     pub temporary: Option<tempfile::TempDir>,
+    #[cfg(target_os = "linux")]
+    pub capture: Option<std::os::unix::net::UnixDatagram>,
     pub npm_wrapper: Option<tempfile::TempDir>,
 }
 
 #[derive(Default)]
 pub struct LaunchConfig<'a> {
+    pub cache: Option<&'a Path>,
     pub npm: bool,
     pub cargo: bool,
     pub node_manager: Option<&'a str>,
@@ -52,7 +55,9 @@ pub async fn prepare(
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let wrapper = (attribute_npm
+    let node_command = crate::manager::executable(command) == Some("node");
+    let wrapper = (node_command
+        || attribute_npm
         || attribute_cargo
         || node_manager.is_some()
         || backend == Backend::Isolated)
@@ -78,7 +83,7 @@ pub async fn prepare(
     }
     let node_hook = wrapper
         .as_ref()
-        .filter(|_| node_attribution || backend == Backend::Isolated)
+        .filter(|_| node_command || node_attribution || backend == Backend::Isolated)
         .map(|dir| dir.path().join("node-dns.cjs"));
     if let Some(hook) = &node_hook {
         std::fs::write(hook, NODE_DNS_HOOK)?;
@@ -137,6 +142,11 @@ pub async fn prepare(
     };
     launch.current_dir(cwd);
     set_proxy(&mut launch, port, secret);
+    if let Some(cache) = config.cache
+        && let Some(manager) = crate::manager::executable(command)
+    {
+        crate::manager_files::configure(&mut launch, manager, cache);
+    }
     if let Some(hook) = &node_hook {
         configure_node_dns(
             &mut launch,
@@ -160,6 +170,8 @@ pub async fn prepare(
         listener: Listener::Tcp(listener),
         command: launch,
         temporary,
+        #[cfg(target_os = "linux")]
+        capture: None,
         npm_wrapper: wrapper,
     })
 }
@@ -292,6 +304,12 @@ pub fn configure_manager(
             .env_remove("VEIL_TELL_NODE_ROOT")
             .env_remove("VEIL_TELL_NODE_MANAGER");
     }
+    if manager == "npm" && attribute {
+        let url = format!("http://veil:{secret}~manager-npm@127.0.0.1:{port}");
+        for key in PROXY_VARS {
+            command.env(key, &url);
+        }
+    }
     if manager == "pnpm" {
         command.env("npm_config_update_notifier", "false");
     }
@@ -329,7 +347,9 @@ pub fn set_proxy(command: &mut Command, port: u16, secret: &str) {
     ] {
         command.env_remove(key);
     }
-    command.env("npm_config_noproxy", "");
+    command
+        .env("npm_config_noproxy", "")
+        .env("NODE_USE_ENV_PROXY", "1");
 }
 
 pub fn supervise_stdio(command: &mut Command) {

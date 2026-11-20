@@ -5,10 +5,13 @@ mod cli;
 mod isolation;
 mod lockfile;
 mod manager;
+mod manager_files;
 mod pnpm;
 mod policy;
 mod proxy;
 mod report;
+mod session;
+mod upstream;
 mod verify;
 mod volume;
 
@@ -51,11 +54,13 @@ fn shorthand_ci(options: &Options) -> bool {
         && std::env::var("CI").is_ok_and(|value| value.eq_ignore_ascii_case("true") || value == "1")
 }
 
-async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u8> {
+async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<Report> {
     let cwd = std::env::current_dir()?.canonicalize()?;
     let shorthand = options.shorthand;
     if shorthand {
-        let install = manager::install_key(&options.command).is_some();
+        let install = manager::install_key(&options.command).is_some_and(|key| {
+            !options.log || cwd.join(".veil-tell").join(format!("{key}.json")).is_file()
+        });
         options.comparison.ci = shorthand_ci(&options) && install && !options.save_baseline;
         options.comparison.automatic = !options.comparison.ci && (options.save_baseline || install);
     }
@@ -96,22 +101,25 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<u
         .transpose()?
         .unwrap_or_default();
     let mut signals = RunSignals::new()?;
+    let agent_state = if options.log {
+        Some(session::state()?)
+    } else {
+        None
+    };
+    let mut guards = Vec::new();
+    if options.comparison.automatic || options.comparison.ci {
+        guards.push(state.as_path());
+    }
+    if let Some(path) = agent_state.as_deref() {
+        guards.push(path);
+    }
     let execution = Execution {
         cwd: &cwd,
         timeout: None,
         protected_outputs: &[],
-        protected_dirs: if options.comparison.automatic || options.comparison.ci {
-            &[state.as_path()]
-        } else {
-            &[]
-        },
+        protected_dirs: &guards,
     };
-    let json = options.json;
-    let report = run_command(options, fixture, policy, &mut signals, execution).await?;
-    if json {
-        println!("{}", serde_json::to_string(&report)?);
-    }
-    Ok(report.run_status.exit_code)
+    run_command(options, fixture, policy, &mut signals, execution).await
 }
 
 struct RunSignals {
@@ -239,6 +247,11 @@ async fn run_command(
         );
     }
     let attribute_npm = wants_npm && !custom_shell;
+    let node_manager = if attribute_npm && manager::install_key(&options.command) == Some("npm") {
+        Some("npm")
+    } else {
+        node_manager
+    };
     let attribute_node = !options.no_attribute && node_manager.is_some();
     let attribute_cargo = !options.no_attribute
         && executable.is_some_and(|name| name == "cargo")
@@ -285,12 +298,21 @@ async fn run_command(
         budgets,
         dns_attempts: (options.backend == Backend::Isolated).then(Default::default),
         incomplete: AtomicBool::new(false),
+        allow_fake_ip: std::env::var_os("VEIL_TELL_ALLOW_FAKE_IP").is_some_and(|s| s == "1"),
+        upstream: upstream::Upstream::from_env()?,
         interfaces: proxy::host_interfaces()?,
         fixture,
     });
+    let cache = if options.backend == Backend::Isolated {
+        manager_files::cache(executable)?
+    } else {
+        None
+    };
     let isolation::Launch {
         listener,
         mut command,
+        #[cfg(target_os = "linux")]
+        capture,
         temporary: _temporary,
         npm_wrapper: _npm_wrapper,
     } = isolation::prepare(
@@ -301,6 +323,7 @@ async fn run_command(
         protected_dirs,
         &secret,
         isolation::LaunchConfig {
+            cache: cache.as_deref(),
             npm: attribute_npm,
             cargo: attribute_cargo,
             node_manager,
@@ -371,6 +394,35 @@ async fn run_command(
             task.abort();
         }
     }
+    #[cfg(target_os = "linux")]
+    let direct: Option<(bool, Vec<report::DirectAttempt>)> = capture.and_then(|socket| {
+        let mut buffer = vec![0; 128 * 1024];
+        match socket
+            .recv(&mut buffer)
+            .ok()
+            .and_then(|n| serde_json::from_slice(&buffer[..n]).ok())
+        {
+            Some(data) => Some(data),
+            None => {
+                eprintln!("veil-tell: direct attempt capture unavailable / 直接通信の試みは未観測");
+                None
+            }
+        }
+    });
+    #[cfg(not(target_os = "linux"))]
+    let direct: Option<(bool, Vec<report::DirectAttempt>)> = None;
+    if let Some((incomplete, rows)) = &direct {
+        if *incomplete {
+            proxy.incomplete.store(true, Ordering::Relaxed)
+        }
+        for row in rows {
+            eprintln!(
+                "veil-tell: blocked direct attempts / 直接通信を拒否: {} ×{}",
+                std::net::SocketAddr::new(row.ip, row.port),
+                row.attempts
+            );
+        }
+    }
     let destinations = proxy.records.snapshot();
     let attempted: Option<Vec<_>> = proxy
         .dns_attempts
@@ -412,7 +464,7 @@ async fn run_command(
         eprintln!("veil-tell: could not write policy draft: {error}");
         (exit_code, reason) = (SETUP_FAILURE, "policy_output_failed");
     }
-    for destination in &destinations {
+    for destination in report::aggregate(&destinations) {
         eprintln!(
             "veil-tell: {}:{} {} {} ×{}",
             destination.host,
@@ -524,6 +576,7 @@ async fn run_command(
         (exit_code, reason) = (volume::OBSERVED_ANOMALY, "volume_anomaly");
     }
     if shorthand_ci(&options)
+        && !options.log
         && !options.save_baseline
         && comparison.is_none()
         && !dns.is_empty()
@@ -532,11 +585,36 @@ async fn run_command(
     {
         (exit_code, reason) = (baseline::NEW_DESTINATION, "new_destination");
     }
+    if reason == "child_failed"
+        && project_home.is_none()
+        && cache.is_none()
+        && let Some(tmp) = &_temporary
+        && executable.is_some_and(|m| matches!(m, "npm" | "pnpm" | "yarn"))
+    {
+        let path = if cfg!(target_os = "linux") {
+            tmp.path().join("home")
+        } else {
+            tmp.path().to_owned()
+        };
+        match manager_files::diagnostics(&path, cwd) {
+            Ok(Some(file)) => eprintln!(
+                "veil-tell: manager diagnostics / 失敗ログ: {}",
+                file.display()
+            ),
+            Err(err) => eprintln!("veil-tell: could not save diagnostics: {err}"),
+            _ => (),
+        }
+    }
     if reason == "incomplete_capture" {
         eprintln!("veil-tell: capture limit exceeded / 記録しきれませんでした");
     }
+    let scope = if direct.is_some() {
+        "Direct attempts counted by IP and port."
+    } else {
+        "Direct sockets are outside the capture scope."
+    };
     eprintln!(
-        "veil-tell: {reason} (exit {exit_code}). Recorded HTTP CONNECT requests: {connect_requests}. Direct sockets are outside the capture scope."
+        "veil-tell: {reason} (exit {exit_code}). Recorded HTTP CONNECT requests: {connect_requests}. {scope}"
     );
     let result = Report {
         schema_version: 1,
@@ -545,7 +623,11 @@ async fn run_command(
         isolation,
         coverage: Coverage {
             proxy: "http_connect_requests",
-            direct_attempt_destinations: "not_observed",
+            direct_attempt_destinations: match &direct {
+                Some((false, _)) => "ip_port",
+                Some((true, _)) => "incomplete",
+                None => "not_observed",
+            },
             dns_attempts: match (attempted.is_some(), reason) {
                 (false, _) => "not_observed",
                 (true, "incomplete_capture") => "incomplete",
@@ -561,6 +643,7 @@ async fn run_command(
                 "while_running"
             },
         },
+        direct_attempts: direct.map(|(_, rows)| rows),
         child_status: status.map(Into::into),
         run_status: RunStatus { exit_code, reason },
         destinations,
@@ -571,7 +654,21 @@ async fn run_command(
     if let Some(file) = report {
         file.save_report(&result)?;
     }
-    let install_hint = match (result.run_status.reason, executable) {
+    let denial = result.destinations.iter().find(|d| d.decision == "deny" && (reason == "child_failed" || d.resolver_hint.is_some())).map(|d| {
+        if d.resolver_hint.is_some() {
+            format!("{} resolved into 198.18.0.0/15 (possible fake-IP DNS). 信頼する fake-IP 環境なら VEIL_TELL_ALLOW_FAKE_IP=1", d.host)
+        } else {
+            format!("veil-tell denied {}:{} ({}). 宛先と拒否理由を確認してください", d.host, d.port, d.reason)
+        }
+    });
+    let direct_hint = result
+        .direct_attempts
+        .as_ref()
+        .filter(|rows| !rows.is_empty() && reason == "child_failed")
+        .map(
+            |_| "direct network attempts were blocked / 直接通信を拒否しました。プロキシ設定を確認",
+        );
+    let install_hint = denial.as_deref().or(direct_hint).or(match (result.run_status.reason, executable) {
         ("child_failed", Some("pnpm"))
             if cfg!(target_os = "macos")
                 && options.backend == Backend::Isolated
@@ -588,7 +685,7 @@ async fn run_command(
             "check that the pinned package manager and Node.js are visible inside isolation, then check the project cache and registry URL / 固定したツールが隔離内で見えるか確認し、キャッシュとレジストリ URL を点検",
         ),
         _ => None,
-    };
+    });
     if let Some(diff) = &result.comparison {
         if diff.created() && attribute_cargo {
             for destination in &result.destinations {
@@ -642,7 +739,12 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
             .ok_or_else(|| error("invalid internal relay invocation"))?;
         return isolation::linux::inside(secret, &args[2..]).await;
     }
-    if args.as_slice() == ["--version"] {
+    match args.first().and_then(|arg| arg.to_str()) {
+        Some("agent-env") => return session::agent_env(&args[1..]),
+        Some("log") => return session::show(&args[1..]),
+        _ => {}
+    }
+    if args.as_slice() == ["--version"] || args.as_slice() == ["version"] {
         println!("veil-tell {}", env!("CARGO_PKG_VERSION"));
         return Ok(0);
     }
@@ -689,12 +791,31 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
         }
         return baseline::accept(&std::env::current_dir()?.canonicalize()?);
     }
-    run(Options::parse(args)?, fixture).await
+    let options = Options::parse(args)?;
+    let json = options.json;
+    let log_args = options.log.then(|| options.command.clone());
+    let result = run(options, fixture).await;
+    if let Some(args) = log_args
+        && let Err(e) = session::append(&std::env::current_dir()?, &args, result.as_ref().ok())
+    {
+        eprintln!("veil-tell: session log: {e}");
+    }
+    let report = result?;
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    }
+    Ok(report.run_status.exit_code)
 }
 
 pub fn entry(fixture: Option<FixtureResolver>) -> ExitCode {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let internal_relay = args.first().is_some_and(|s| s == "__veil_tell_linux_relay");
     let result = (|| {
+        if let Some(program) = std::env::args_os().next()
+            && let Some(name) = session::shim_name(&program)
+        {
+            return session::shim(name, &args);
+        }
         if args
             .first()
             .is_some_and(|arg| arg == attribution::WRAPPER_MODE)
@@ -727,6 +848,9 @@ pub fn entry(fixture: Option<FixtureResolver>) -> ExitCode {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("veil-tell: {error}");
+            if internal_relay {
+                return ExitCode::from(SETUP_FAILURE);
+            }
             let next = error
                 .downcast_ref::<pnpm::StoreError>()
                 .map_or("veil-tell --help", |error| error.next);

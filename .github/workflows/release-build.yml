@@ -26,6 +26,9 @@ jobs:
           - runner: macos-26
             platform: macos-arm64
             target: aarch64-apple-darwin
+          - runner: ubuntu-26.04-arm
+            platform: linux-aarch64-gnu
+            target: aarch64-unknown-linux-gnu
           - runner: ubuntu-26.04
             platform: linux-x86_64-gnu
             target: x86_64-unknown-linux-gnu
@@ -96,7 +99,7 @@ jobs:
       - name: Assemble and verify SHA256SUMS
         working-directory: dist
         run: |
-          cat veil-tell-*-macos-arm64.sha256 veil-tell-*-linux-x86_64-gnu.sha256 > SHA256SUMS
+          cat veil-tell-*-macos-arm64.sha256 veil-tell-*-linux-*-gnu.sha256 > SHA256SUMS
           sha256sum --strict -c SHA256SUMS
 
       - name: Upload distribution files

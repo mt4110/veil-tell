@@ -2,6 +2,49 @@
 
 [日本語](README.md)
 
+## Use with an AI agent
+
+In the project shell, load the shims, then launch Claude Code (`claude`), Codex (`codex`), or Cursor CLI (`agent`). Commands that inherit this PATH, including npm, curl and git, run through veil-tell. Check with `command -v npm` inside the agent's terminal. Absolute executable paths, shell aliases and the agent's own API client can operate outside these shims. [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
+
+```sh
+eval "$(veil-tell agent-env --shell zsh)"
+claude
+# codex
+# agent
+veil-tell log --today --only-blocked
+```
+
+For the Bash tool in Claude Code, a `SessionStart` command hook can run `veil-tell agent-env --shell bash >> "$CLAUDE_ENV_FILE"`. [Claude Code environment hooks](https://code.claude.com/docs/en/hooks#persist-environment-variables)
+
+These are actual shim runs of Puppeteer 25.17.0 with `CI=true` and a reviewed registry-only baseline. The command ran in a shell on each OS. ✓ identifies an allowed CONNECT. Bytes count data forwarded through the TLS tunnel. A denied CONNECT has zero forwarded bytes, while the amount the child intended to send is unknown.
+
+macOS 27.2.1 arm64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55682 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+Debian 13 aarch64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55570 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+Use `--shell bash|zsh|fish` (fish: `veil-tell agent-env --shell fish | source`), or run one command with `veil-tell --log COMMAND`. Shims observe by default and use the existing rules for dependency commands with a project baseline. Use `veil-tell log --since 2h --only-new --json` for filtered JSON Lines, or `veil-tell version` for the installed version.
+
+veil-tell sends no telemetry. Session history stays under `$XDG_STATE_HOME/veil-tell/log` (default: `~/.local/state` on Linux, `~/Library/Application Support` on macOS as the state root). Logging masks URL paths, query strings and recognized credential arguments. Arbitrary positional arguments may still be sensitive. Set `VEIL_TELL_LOG=off` to disable history. Retention is 30 days, up to 10 MiB per day.
+
+### Proxy and cache troubleshooting
+
+- Node.js uses the environment proxy for both `fetch` and `https.get` on the 22.x line from 22.21 and the 24.x line from 24.5. A custom client agent can choose another route. [Node.js proxy support](https://nodejs.org/learn/http/enterprise-network-configuration)
+- An all-198.18.0.0/15 DNS answer may indicate a fake-IP resolver. In a trusted TUN environment set `VEIL_TELL_ALLOW_FAKE_IP=1`. Mixed and local answers remain denied.
+- An HTTP proxy in `HTTPS_PROXY` or `https_proxy` receives allowed CONNECTs. For those tunnels the upstream controls DNS and destination address checks. `NO_PROXY` supports host/domain suffixes, optional `:443` and `*`.
+- `VEIL_TELL_CACHE=persistent` enables a separate cache under `~/.cache/veil-tell/<manager>` in isolation. A destination absent after a cache hit is informational. Keep the pnpm project's existing store setting. When recognized error codes are available in temporary manager logs, veil-tell saves diagnostic output under `.veil-tell/logs/`. Exclude that directory from Git.
+
 ## Quick start
 
 ```sh
@@ -106,14 +149,14 @@ Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. 
 
 - **Capture includes HTTP CONNECT requests that reach the local proxy.** The proxy backend permits direct connections, which are outside its capture scope.
 - **Isolation also records supported Node.js lookup attempts.** The report identifies this as `coverage.dns_attempts: node_dns_lookup_hook`. Native system resolvers and direct IP attempts are outside this coverage. [Details](docs/dns-attempts.md)
-- **The isolated backend restricts direct connections at the OS level.** Both modes report `coverage.proxy = "http_connect_requests"` and `coverage.direct_attempt_destinations = "not_observed"` in JSON v1. The report omits details of OS-denied direct connections and IPC.
+- **The isolated backend restricts direct connections at the OS level.** Linux reports `coverage.direct_attempt_destinations = "ip_port"` when seccomp notifications are available, `not_observed` when unavailable, and `incomplete` on capture overflow.
 - **Data can still leave through an allowed host.** CI and explicitly configured limits can close a tunnel when outbound volume exceeds its budget. Bytes within the limit can still reach the receiver. [Volume limits and scope](docs/volume-limits.md) For example, a child process may be able to send secrets to an allowed GitHub host or npm registry using credentials it can access or public upload features. The proxy tunnels TLS. HTTP methods, URL paths, and request bodies are outside its capture and control scope. An allow rule permits a tunnel to the host.
 
 | Capture under isolation | Linux | macOS |
 | --- | --- | --- |
 | HTTP CONNECT reaching the proxy | Hostname and port | Hostname and port |
 | Supported Node.js lookups | Recorded by hostname and denied | Recorded by hostname and denied |
-| System resolvers used by curl, Python, Go and Rust, or literal IPs | Direct destinations and counts are unobserved | Direct destinations and counts are unobserved |
+| System resolvers used by curl, Python, Go and Rust, or literal IPs | IP, port and count with notification support. DNS question names are unavailable | Direct destinations and counts are unobserved |
 
 `CI=true veil-tell npm install` requires isolation and an existing baseline, and returns `21` for new CONNECT destinations or newly observed lookup attempts. Local shorthand does not fail solely on recorded lookup attempts. Explicit `observe --baseline FILE` reports an outbound volume anomaly with exit `21`; an enforced tunnel cutoff still uses `22`. Small transfers below the threshold and totals spanning several runs are outside volume comparison.
 

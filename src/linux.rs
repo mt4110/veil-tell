@@ -12,6 +12,9 @@ use tokio::process::Command;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
+#[path = "linux_notify.rs"]
+mod notify;
+const CAPTURE_SOCKET: &str = "/veil-tell-capture.sock";
 const RELAY_SOCKET: &str = "/veil-tell-proxy.sock";
 const DNS_HOOK: &str = "/veil-tell-node-dns.cjs";
 const RELAY_PROGRAM: &str = "/veil-tell-relay";
@@ -60,8 +63,13 @@ pub async fn prepare(
     let temporary = tempfile::Builder::new()
         .prefix("veil-tell-")
         .tempdir_in("/tmp")?;
+    let child_home = temporary.path().join("home");
+    std::fs::create_dir(&child_home)?;
     let socket = temporary.path().join("proxy.sock");
     let listener = UnixListener::bind(&socket)?;
+    let capture_path = temporary.path().join("capture.sock");
+    let capture = std::os::unix::net::UnixDatagram::bind(&capture_path)?;
+    capture.set_nonblocking(true)?;
     let mut launch = Command::new(bwrap);
     launch.env_clear().args([
         "--unshare-user",
@@ -81,6 +89,19 @@ pub async fn prepare(
         "--dir",
         "/tmp/veil-tell-home",
     ]);
+    launch
+        .arg("--bind")
+        .arg(&child_home)
+        .arg("/tmp/veil-tell-home");
+    if let Some(cache) = config.cache
+        && let Some(manager) = crate::manager::executable(command)
+    {
+        launch
+            .arg("--bind")
+            .arg(cache)
+            .arg("/veil-tell-cache")
+            .args(["--setenv", "VEIL_TELL_CACHE_MANAGER", manager]);
+    }
     for &dir in SYSTEM_DIRS {
         if Path::new(dir).is_dir() {
             launch.args(["--ro-bind", dir, dir]);
@@ -173,6 +194,9 @@ pub async fn prepare(
     }
     launch
         .arg("--ro-bind")
+        .arg(capture_path)
+        .arg(CAPTURE_SOCKET)
+        .arg("--ro-bind")
         .arg(socket)
         .arg(RELAY_SOCKET)
         .arg("--ro-bind")
@@ -187,6 +211,7 @@ pub async fn prepare(
         listener: Listener::Unix(listener),
         command: launch,
         temporary: Some(temporary),
+        capture: Some(capture),
         npm_wrapper: None,
     })
 }
@@ -210,6 +235,9 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
         crate::pnpm::configure_corepack(&mut command, cache.as_deref().map(Path::new));
     }
     let port = listener.local_addr()?.port();
+    if let Ok(manager) = std::env::var("VEIL_TELL_CACHE_MANAGER") {
+        crate::manager_files::configure(&mut command, &manager, Path::new("/veil-tell-cache"));
+    }
     set_proxy(&mut command, port, secret);
     super::configure_node_dns(&mut command, Path::new(DNS_HOOK), port, secret, true)?;
     if let Ok(manager) = std::env::var("VEIL_TELL_NODE_MANAGER") {
@@ -241,7 +269,9 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
     unsafe {
         command.pre_exec(move || apply_filter(&filter));
     }
-    let mut child = command.spawn()?;
+    let feedback = std::os::unix::net::UnixDatagram::unbound()?;
+    feedback.connect(CAPTURE_SOCKET)?;
+    let (mut child, capture) = notify::spawn(command)?;
     let mut tunnels = JoinSet::new();
     let result = loop {
         tokio::select! {
@@ -280,6 +310,10 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
     tunnels.shutdown().await;
     if let Ok(result) = drained {
         result?;
+    }
+    if let Some(snapshot) = capture.and_then(|capture| capture.snapshot()) {
+        let bytes = serde_json::to_vec(&snapshot)?;
+        feedback.send(&bytes)?;
     }
     Ok(result?)
 }

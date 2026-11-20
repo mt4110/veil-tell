@@ -185,7 +185,7 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
         ], 0)
         assert result.returncode == 21 and "CONNECT=403" in result.stdout, result.stderr
         data = json.loads(changed.read_text())
-        assert data["coverage"]["direct_attempt_destinations"] == "not_observed"
+        assert data["coverage"]["direct_attempt_destinations"] == ("ip_port" if sys.platform == "linux" else "not_observed")
         assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
         event, = data["destinations"]
         assert (event["reason"], event["result"], event["sent_bytes"], event["received_bytes"]) == (
@@ -340,8 +340,8 @@ def dns_attempt_test(cli, project, evidence, runtime):
         "scripts": {"postinstall": "node probe.cjs"},
     }))
     (demo / "probe.cjs").write_text(
-        'fetch("https://postinstall.invalid").then(() => process.exit(2), '
-        'error => { if (error.cause?.code !== "ENOTFOUND") process.exit(3) });'
+        'require("node:dns").promises.lookup("postinstall.invalid").then(() => process.exit(2), '
+        'error => { if (error.code !== "ENOTFOUND") process.exit(3) });'
     )
     if sys.platform == "linux":
         shutil.copytree(runtime, demo / "runtime", symlinks=True)
@@ -645,6 +645,57 @@ def baseline_upgrade_test(cli, project, runtime):
     print(f"fixture os={sys.platform} known_destination_missing=5 approvals=0 migration=ok")
 
 
+def output_and_upstream_test(cli, project):
+    def invoke(args, env=None):
+        return subprocess.run([cli, *args], cwd=project, env=env, capture_output=True, text=True, timeout=12)
+    missing = invoke(["veil-tell-command-does-not-exist"])
+    assert missing.returncode and missing.stderr.count("Next / 次:") == 1, missing.stderr
+    denied = invoke(["curl", "-fsS", "https://example.local"])
+    assert denied.returncode and "Next / 次: veil-tell denied example.local:443 (non_public_destination)" in denied.stderr
+    env = dict(os.environ, NO_PROXY="", no_proxy="")
+    with socket.socket() as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.listen()
+        receiver.settimeout(6)
+        env["HTTPS_PROXY"] = f"http://trial:fixture-secret@127.0.0.1:{receiver.getsockname()[1]}"
+        requests = []
+        def upstream():
+            for _ in range(2):
+                conn, _ = receiver.accept()
+                with conn, conn.makefile("rb") as stream:
+                    request = []
+                    for line in stream:
+                        if line == b"\r\n": break
+                        request.append(line)
+                    requests.append(request)
+                    conn.sendall(b"HTTP/1.1 200 Established\r\n\r\n")
+                    stream.read()
+                    conn.sendall(b"ACK")
+        thread = threading.Thread(target=upstream)
+        thread.start()
+        try:
+            result=invoke(["observe","--json","--",sys.executable,"-B","probe.py","observe-candidates"],env)
+        finally:
+            thread.join()
+    assert result.returncode==0, result.stderr
+    assert len(requests)==2 and all(r[0]==b"CONNECT allowed.test:443 HTTP/1.1\r\n" for r in requests)
+    encoded = base64.b64encode(b"trial:fixture-secret")
+    assert all(b"Proxy-Authorization: Basic "+encoded+b"\r\n" in r for r in requests)
+    assert all(secret not in result.stdout+result.stderr for secret in ("fixture-secret",encoded.decode()))
+    assert json.loads(result.stdout)["destinations"][0]["via_upstream_proxy"]
+    assert [s for s in result.stderr.splitlines() if s.startswith("veil-tell: allowed.test:")] == [
+        "veil-tell: allowed.test:443 allow observe ×2"]
+    if sys.platform != "linux":
+        print("SKIP direct_attempts: Linux seccomp notification test")
+        return
+    for cmd in ([sys.executable,"-c","import socket;socket.create_connection(('192.0.2.1',443),1)"],
+                ["curl","--noproxy","*","--max-time","2","https://example.invalid"]):
+        trial=invoke(["observe","--backend","isolated","--json","--",*cmd])
+        data=json.loads(trial.stdout)
+        assert data["coverage"]["direct_attempt_destinations"]=="ip_port" and trial.returncode
+        assert any(r["attempts"]>=1 and r["port"]==(443 if cmd[0]==sys.executable else 53) for r in data["direct_attempts"])
+
+
 def run(cli, fixture, node_root=None):
     cli, fixture = Path(cli).resolve(), Path(fixture).resolve()
     ip = os.environ.get("VEIL_TELL_TEST_IP", "127.0.0.1")
@@ -655,6 +706,7 @@ def run(cli, fixture, node_root=None):
         evidence = root / "evidence"
         evidence.mkdir()
         shutil.copyfile(SCRIPT, project / "probe.py")
+        output_and_upstream_test(cli, project)
         policies = {}
         for action in ("unknown", "allow", "deny"):
             path = evidence / f"{action}.toml"
@@ -708,7 +760,7 @@ def run(cli, fixture, node_root=None):
                 assert report["schema_version"] == 1 and report["backend"] == backend
                 assert report["child_status"]["exit_code"] == 0
                 assert report["run_status"]["exit_code"] == exit_code
-                assert report["coverage"]["direct_attempt_destinations"] == "not_observed"
+                assert report["coverage"]["direct_attempt_destinations"] == ("ip_port" if backend == "isolated" and sys.platform == "linux" else "not_observed")
                 assert report["coverage"]["proxy"] == "http_connect_requests"
                 assert len(report["destinations"]) == 1 and report["destinations"][0]["reason"] == expected
                 print(f"receiver case={name} connections={len(collected)} tokens={collected} exit={exit_code}")
@@ -796,6 +848,17 @@ def npm_test(fixture, runtime, project, evidence, policy, ip):
                 fixture, "restrict", "--backend", "isolated", "--policy", policy, "--fail-on-unknown",
                 "--report", evidence / "npm.json", "--", *command,
             ], cwd=project, env=env, capture_output=True, text=True, timeout=25)
+            for backend in ("proxy", "isolated"):
+                for probe in ("fetch('https://allowed.test/veil-cli-fixture').then(r=>r.json()).then(r=>console.log(r.name))",
+                              "require('node:https').get('https://allowed.test/veil-cli-fixture',{ca:require('fs').readFileSync('registry.crt')},r=>r.pipe(process.stdout))"):
+                    # Supply the fixture CA in the child even when the isolated environment is cleared.
+                    child = subprocess.run([fixture, "observe", "--backend", backend, "--json", "--",
+                                            runtime / "bin/node", "--use-openssl-ca", "-e",
+                                            "const tls=require('node:tls');tls.setDefaultCACertificates([require('fs').readFileSync('registry.crt','utf8')]);"+probe],
+                                           cwd=project, env=env, text=True, capture_output=True, timeout=10)
+                    assert child.returncode == 0 and "veil-cli-fixture" in child.stderr, child.stderr
+                    row, = json.loads(child.stdout)["destinations"]
+                    assert (row["host"],row["attempts"],row["result"]) == ("allowed.test",1,"completed"), row
             training_command = ["--cache=.npm-training-cache" if arg.startswith("--cache=") else arg
                                 for arg in command]
             training_command[1] = "ci"

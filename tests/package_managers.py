@@ -198,8 +198,8 @@ def test_manager(cli, tool, manager):
             "name": "probe", "version": "1.2.3", "scripts": {"postinstall": "node probe.cjs"},
         })
         (dep / "probe.cjs").write_text(
-            'fetch("https://new-package.invalid").then(() => process.exit(2), '
-            'error => { if (error.cause?.code !== "ENOTFOUND") process.exit(3) });\n'
+            'require("node:dns").promises.lookup("new-package.invalid").then(() => process.exit(2), '
+            'error => { if (error.code !== "ENOTFOUND") process.exit(3) });\n'
         )
         update_flags = ["--force"] if manager == "pnpm" and version.startswith("9.") else []
         updated, _ = run([cli, "ci", "--json", "--", *command, *update_flags])
@@ -368,6 +368,10 @@ try {
 
 if __name__ == "__main__":
     cli = Path(sys.argv[1]).resolve()
+    if len(sys.argv)>2 and sys.argv[2]=="--persistent":
+        from agent_env import trial
+        trial(str(cli.parent/"examples/receiver_cli"),sys.argv[3],cache=True)
+        sys.exit(0)
     tools = [(name, Path(path).absolute()) for name, path in (arg.split("=", 1) for arg in sys.argv[2:])]
     if compatibility := [path for name, path in tools if name == "corepack"]:
         corepack, = compatibility
