@@ -43,6 +43,7 @@ veil-tell 自体はテレメトリーを送りません。履歴はローカル�
 - Node.js の `fetch` と `https.get` は 22 系では 22.21 から、24 系では 24.5 から両方が環境プロキシに対応します。独自のクライアントエージェントは別の経路を選べます。[Node.js のプロキシ対応](https://nodejs.org/learn/http/enterprise-network-configuration)
 - DNS の解決先がすべて 198.18.0.0/15 なら fake-IP の可能性があります。信頼する TUN 環境だけで `VEIL_TELL_ALLOW_FAKE_IP=1` を指定してください。混在・ローカル宛先は引き続き拒否します。
 - `HTTPS_PROXY` または `https_proxy` が HTTP プロキシなら、許可した CONNECT をそこへ中継します。この経路の名前解決・接続先アドレス検査は上流側が担います。`NO_PROXY` はホスト名・ドメイン接尾辞・任意の `:443`・`*` に対応します。
+- macOS の隔離中に `curl: (60) ... unable to get local issuer certificate` が出たら、その宛先の証明書チェーンを検証できる、信頼済みの CA バンドルを `curl --cacert /path/to/ca-bundle.pem` で指定してください。CONNECT が許可された後でも、TLS の証明書検証は失敗することがあります。
 - `VEIL_TELL_CACHE=persistent` で、隔離内に専用の `~/.cache/veil-tell/<manager>` を用意します。キャッシュ命中で消えた宛先は情報扱いです。pnpm は従来のプロジェクトストア設定も使います。一時ホームのマネージャーログがあれば、診断に使う既知のエラーコードを `.veil-tell/logs/` に保存します。このディレクトリは Git 管理外にしてください。
 
 ## 使い方

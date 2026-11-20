@@ -43,6 +43,7 @@ veil-tell sends no telemetry. Session history stays under `$XDG_STATE_HOME/veil-
 - Node.js uses the environment proxy for both `fetch` and `https.get` on the 22.x line from 22.21 and the 24.x line from 24.5. A custom client agent can choose another route. [Node.js proxy support](https://nodejs.org/learn/http/enterprise-network-configuration)
 - An all-198.18.0.0/15 DNS answer may indicate a fake-IP resolver. In a trusted TUN environment set `VEIL_TELL_ALLOW_FAKE_IP=1`. Mixed and local answers remain denied.
 - An HTTP proxy in `HTTPS_PROXY` or `https_proxy` receives allowed CONNECTs. For those tunnels the upstream controls DNS and destination address checks. `NO_PROXY` supports host/domain suffixes, optional `:443` and `*`.
+- If isolated curl on macOS reports `curl: (60) ... unable to get local issuer certificate`, pass a trusted CA bundle that verifies the destination’s certificate chain with `curl --cacert /path/to/ca-bundle.pem`. TLS certificate validation can fail after an allowed CONNECT.
 - `VEIL_TELL_CACHE=persistent` enables a separate cache under `~/.cache/veil-tell/<manager>` in isolation. A destination absent after a cache hit is informational. Keep the pnpm project's existing store setting. When recognized error codes are available in temporary manager logs, veil-tell saves diagnostic output under `.veil-tell/logs/`. Exclude that directory from Git.
 
 ## Quick start
