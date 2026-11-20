@@ -126,8 +126,10 @@ def trial(fixture, node_root, cache=False):
             source.write_bytes(b"prefix:remaining input\n")
             with source.open("rb") as stream:
                 stream.seek(len(b"prefix:"))
+                # Keep this system curl invocation outside the blocked-timeline fixture.
+                file_env = dict(env, XDG_STATE_HOME=str(root / "file-stdin-state"))
                 result = subprocess.run(["/bin/sh", "-c", setup + "\ncurl --version >/dev/null && cat"],
-                                        cwd=project, env=env, stdin=stream, capture_output=True, timeout=10)
+                                        cwd=project, env=file_env, stdin=stream, capture_output=True, timeout=10)
                 assert result.returncode == 0 and result.stdout == b"remaining input\n", (result.stdout, result.stderr)
             # A terminal supplies bytes and EOF to the supervised process as well.
             master, slave = pty.openpty()
@@ -149,7 +151,8 @@ def trial(fixture, node_root, cache=False):
             assert blocked.returncode != 0
             last=json.loads(path.read_text().splitlines()[-1])
             golden=f'{last["clock"]}  curl -fsS https://fixture.local  exit {blocked.returncode}\n          ✗ fixture.local:443  ×1  0 B  non_public_destination\n'
-            assert run([fixture,"log","--today","--only-blocked"]).stdout == golden
+            blocked_log = run([fixture,"log","--today","--only-blocked"]).stdout
+            assert blocked_log == golden, (blocked_log, golden)
             expired = path.with_name("2000-01-01.jsonl")
             unrelated = path.with_name("notes.txt")
             expired.write_text("{}\n")
