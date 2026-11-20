@@ -22,6 +22,7 @@ use report::{Coverage, OutputFile, Report, RunStatus};
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::net::SocketAddr;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -106,8 +107,10 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<R
     if let Some(path) = agent_state.as_deref() {
         guards.push(path);
     }
+    let stdin = options.shim.then(session::shim_stdin).transpose()?;
     let execution = Execution {
         cwd: &cwd,
+        stdin: stdin.as_ref(),
         timeout: None,
         protected_outputs: &[],
         protected_dirs: &guards,
@@ -178,6 +181,7 @@ impl RunSignals {
 #[derive(Clone, Copy)]
 struct Execution<'a> {
     cwd: &'a Path,
+    stdin: Option<&'a OwnedFd>,
     timeout: Option<Duration>,
     protected_outputs: &'a [&'a Path],
     protected_dirs: &'a [&'a Path],
@@ -193,6 +197,7 @@ async fn run_command(
 ) -> Result<Report> {
     let Execution {
         cwd,
+        stdin,
         timeout,
         protected_outputs,
         protected_dirs,
@@ -376,6 +381,9 @@ async fn run_command(
         eprintln!(
             "veil-tell: observing HTTP CONNECT requests from clients that use the local proxy. Direct connection attempts are outside the capture scope."
         );
+    }
+    if let Some(input) = stdin {
+        command.stdin(input.try_clone()?);
     }
     let mut child = command.spawn()?;
     if let Some(allowed) = &mut can_retry {

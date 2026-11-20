@@ -44,6 +44,7 @@ pub struct Options {
     pub log: bool,
     pub json: bool,
     pub shorthand: bool,
+    pub shim: bool,
     pub save_baseline: bool,
     pub comparison: crate::baseline::Options,
 }
@@ -77,11 +78,14 @@ impl Options {
             json,
             log,
             shorthand: false,
+            shim: false,
             save_baseline,
             comparison: Default::default(),
         };
         match args.first().and_then(|arg| arg.to_str()) {
-            Some("--") if args.len() >= 2 => {
+            Some("--" | crate::session::SHIM_MODE) if args.len() >= 2 => {
+                options.shim = args[0] == crate::session::SHIM_MODE;
+                options.log |= options.shim;
                 options.shorthand = true;
                 options.command = args.split_off(1);
                 return Ok(options);

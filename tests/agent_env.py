@@ -70,9 +70,9 @@ def trial(fixture, node_root, cache=False):
                        NO_PROXY="*", PATH=f"{runtime / 'bin'}:{os.environ['PATH']}")
             env.pop("CI", None)
             env.pop("VEIL_TELL_LOG", None)
-            def run(cmd, *, code=0, extra=None):
+            def run(cmd, *, code=0, extra=None, input=None):
                 p = subprocess.run(cmd, cwd=project, env=dict(env, **(extra or {})),
-                                   capture_output=True, text=True, timeout=35)
+                                   input=input, capture_output=True, text=True, timeout=35)
                 assert code is None or p.returncode == code, (cmd, p.stdout, p.stderr)
                 return p
             setup = run([fixture, "agent-env"]).stdout
@@ -110,6 +110,30 @@ def trial(fixture, node_root, cache=False):
             assert not (project/".veil-tell/npm.json").exists()
             shell(curl, extra={"VEIL_TELL_LOG":"off"})
             assert len(path.read_text().splitlines())==2
+            # curl obtains its only URL from stdin. Exercise both shim entry points,
+            # then check that opting into logging on the ordinary CLI still gets EOF.
+            config = 'url = "https://allowed.test/from-stdin"\n'
+            from_stdin = ["curl", "-fsS", "--cacert", str(ca), "--config", "-"]
+            start = requests.count("/from-stdin")
+            shell(from_stdin, input=config)
+            run([fixture, "agent", "--", *from_stdin], input=config)
+            assert requests.count("/from-stdin") == start + 2
+            direct = run([fixture, "--log", "--", *from_stdin], input=config, code=None)
+            assert direct.returncode != 0 and requests.count("/from-stdin") == start + 2
+            # A terminal supplies bytes and EOF to the supervised process as well.
+            master, slave = pty.openpty()
+            try:
+                os.write(master, config.encode() + b"\x04")
+                with subprocess.Popen(["/bin/sh", "-c", setup + '\nexec "$@"', "test", *from_stdin],
+                                      cwd=project, env=env, stdin=slave,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE) as child:
+                    stdout, stderr = child.communicate(timeout=10)
+                    assert child.returncode == 0, (stdout, stderr)
+            finally:
+                os.close(slave)
+                os.close(master)
+            assert requests.count("/from-stdin") == start + 3
+            assert "/from-stdin" not in path.read_text()
             run([fixture,"--log","true","--password","briefsecret",secret])
             assert all(s not in path.read_text() for s in ("private?", "othersecret","shortsecret","briefsecret",secret))
             blocked=shell(["curl","-fsS","https://fixture.local"],code=None)

@@ -327,10 +327,12 @@ impl Runner<'_> {
             json: false,
             log: false,
             shorthand: false,
+            shim: false,
             save_baseline: false,
         };
         let execution = Execution {
             cwd: project.path(),
+            stdin: None,
             timeout: Some(self.config.timeout),
             protected_outputs: &[self.output],
             protected_dirs: &self.protected_dirs,

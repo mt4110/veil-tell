@@ -7,14 +7,16 @@ use std::{
     ffi::OsString,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
+    os::fd::{AsFd, AsRawFd, OwnedFd},
     os::unix::{
-        fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, symlink},
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, symlink},
         process::CommandExt,
     },
     path::{Path, PathBuf},
     time::SystemTime,
 };
 
+pub(crate) const SHIM_MODE: &str = "__veil_tell_shim";
 const SHIMS: &[&str] = &[
     "npm", "npx", "pnpm", "yarn", "bun", "pip", "pip3", "uv", "cargo", "curl", "wget", "git",
 ];
@@ -121,11 +123,41 @@ pub fn shim(name: &str, args: &[OsString]) -> Result<u8> {
     )?;
     let mut launch = std::process::Command::new(executable);
     launch
-        .args(["--log", "--", name])
+        .args([SHIM_MODE, name])
         .args(args)
         .env("PATH", filtered);
     crate::agent::restore_upstream(&mut launch);
     Err(launch.exec().into())
+}
+
+/// Keep pipeline reads demand-driven. For terminals and other descriptors,
+/// hand the sandbox a one-way byte stream, never a host TTY or connected socket.
+pub(super) fn shim_stdin() -> std::io::Result<OwnedFd> {
+    let mut input = File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
+    let flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if input.metadata()?.file_type().is_fifo() && flags & libc::O_ACCMODE == libc::O_RDONLY {
+        return Ok(input.into());
+    }
+    let (reader, mut writer) = std::io::pipe()?;
+    // A shim process supervises one command. A quiet terminal must not delay its exit.
+    std::thread::Builder::new()
+        .name("shim-stdin".into())
+        .spawn(move || {
+            // A background shim may never need input. Wait for foreground
+            // ownership before reading a controlling terminal to avoid SIGTTIN.
+            loop {
+                let foreground = unsafe { libc::tcgetpgrp(input.as_raw_fd()) };
+                if foreground < 0 || foreground == unsafe { libc::getpgrp() } {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            let _ = std::io::copy(&mut input, &mut writer);
+        })?;
+    Ok(reader.into())
 }
 
 fn scrub(s: &str) -> String {
