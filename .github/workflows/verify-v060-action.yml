@@ -1,0 +1,44 @@
+name: Verify released veil-tell v0.6.0 Action
+on:
+  push:
+    branches: [feat/verify-v060-action]
+permissions:
+  contents: read
+  attestations: read
+jobs:
+  consumer:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-26, ubuntu-26.04, ubuntu-26.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare an offline npm fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$(uname -s)" == Linux && ! -x /usr/bin/bwrap ]]; then
+            sudo apt-get update
+            sudo apt-get install -y bubblewrap
+          fi
+          mkdir -p .veil-tell
+          printf '%s\n' '{"schema_version":1,"backend":"isolated","coverage":"http_connect_requests","destinations":[]}' > .veil-tell/npm.json
+          printf '%s\n' '{"name":"release-smoke","version":"1.0.0","private":true,"scripts":{"smoke":"node -e \"console.log(42)\""}}' > package.json
+          printf 'update-notifier=false\n' > .npmrc
+      - name: Run the published Action
+        id: veil
+        uses: mt4110/veil-tell@v0.6.0
+        with:
+          command: npm run smoke
+      - name: Verify the version and isolated result
+        shell: bash
+        env:
+          REPORT: ${{ steps.veil.outputs.report }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/veil-tell/bin/veil-tell" --version | grep -Fx 'veil-tell 0.6.0'
+          jq -e '.backend == "isolated" and .run_status.exit_code == 0 and .child_status.exit_code == 0' "$REPORT"
