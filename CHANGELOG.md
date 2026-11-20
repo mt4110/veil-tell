@@ -5,6 +5,7 @@
 - Run supported shell commands through local shims with `agent-env`. Review redacted per-command session history with `log`, including new destinations, blocked attempts, forwarded bytes and inferred attribution.
 - Route supported Node.js fetch and HTTPS clients through the local proxy on both backends. Group human-readable CONNECT rows, explain denied destinations, and accept `version` as an alias for `--version`.
 - Recognize possible fake-IP resolvers and support an explicit opt-in. Honor HTTP upstream proxies. JSON v1 adds optional `resolver_hint`, `via_upstream_proxy`, and manager/phase attribution.
+- Linux shorthand starts the system bubblewrap sandbox once on a successful run. A filtered pre-exec signal guards against replaying the command during fallback.
 - On Linux, optional seccomp notification support reports `direct_attempts` and coverage values `ip_port` or `incomplete`. This is stage A only. Native DNS question names and macOS direct socket destinations remain unobserved.
 - Opt into dedicated persistent manager caches. On temporary-home failures, preserve recognized diagnostic codes from manager logs rather than copying raw logs containing credentials.
 - Add Linux aarch64 release packaging and artifact attestation, plus CodeQL and a Scorecard workflow with result publication disabled.

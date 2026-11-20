@@ -74,24 +74,16 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<R
             return Err(error("use a real .veil-tell directory inside this project"));
         }
     }
-    if shorthand {
+    // With the system Linux launcher the real sandbox can attest startup itself.
+    // Keep the independent preflight for other backends and custom launchers.
+    let check_on_failure =
+        cfg!(target_os = "linux") && shorthand && std::env::var_os("VEIL_TELL_BWRAP").is_none();
+    if check_on_failure {
+        options.backend = Backend::Isolated;
+    } else if shorthand {
         match isolation::probe(&cwd).await {
             Ok(()) => options.backend = Backend::Isolated,
-            Err(reason) => {
-                if shorthand_ci(&options) {
-                    return Err(error(format!(
-                        "CI requires isolation / CI には隔離が必要です: {reason}"
-                    )));
-                }
-                let setup = if cfg!(target_os = "linux") {
-                    "sudo apt-get install bubblewrap (Ubuntu; requires unprivileged namespaces)"
-                } else {
-                    "test -x /usr/bin/sandbox-exec"
-                };
-                eprintln!(
-                    "veil-tell: isolation unavailable ({reason}); observing via proxy. Direct connections are not visible / 直接通信は見えていません。隔離を使うには: {setup}"
-                );
-            }
+            Err(reason) => select_proxy_fallback(&mut options, &reason.to_string())?,
         }
     }
     let policy = options
@@ -119,7 +111,46 @@ async fn run(mut options: Options, fixture: Option<FixtureResolver>) -> Result<R
         protected_outputs: &[],
         protected_dirs: &guards,
     };
-    run_command(options, fixture, policy, &mut signals, execution).await
+    if check_on_failure {
+        let mut can_retry = true;
+        let result = run_command(
+            &options,
+            fixture,
+            policy.clone(),
+            &mut signals,
+            execution,
+            Some(&mut can_retry),
+        )
+        .await;
+        if result.is_ok() || !can_retry {
+            return result;
+        }
+        // A command-specific preparation error must not relax isolation. Only the
+        // same independent capability check used by the other launchers can do so.
+        match isolation::probe(&cwd).await {
+            Ok(()) => return result,
+            Err(reason) => select_proxy_fallback(&mut options, &reason.to_string())?,
+        }
+    }
+    run_command(&options, fixture, policy, &mut signals, execution, None).await
+}
+
+fn select_proxy_fallback(options: &mut Options, reason: &str) -> Result<()> {
+    if shorthand_ci(options) {
+        return Err(error(format!(
+            "CI requires isolation / CI には隔離が必要です: {reason}"
+        )));
+    }
+    let setup = if cfg!(target_os = "linux") {
+        "sudo apt-get install bubblewrap (Ubuntu; requires unprivileged namespaces)"
+    } else {
+        "test -x /usr/bin/sandbox-exec"
+    };
+    eprintln!(
+        "veil-tell: isolation unavailable ({reason}); observing via proxy. Direct connections are not visible / 直接通信は見えていません。隔離を使うには: {setup}"
+    );
+    options.backend = Backend::Proxy;
+    Ok(())
 }
 
 struct RunSignals {
@@ -143,6 +174,7 @@ impl RunSignals {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Execution<'a> {
     cwd: &'a Path,
     timeout: Option<Duration>,
@@ -151,11 +183,12 @@ struct Execution<'a> {
 }
 
 async fn run_command(
-    options: Options,
+    options: &Options,
     fixture: Option<FixtureResolver>,
     policy: policy::Policy,
     signals: &mut RunSignals,
     execution: Execution<'_>,
+    mut can_retry: Option<&mut bool>,
 ) -> Result<Report> {
     let Execution {
         cwd,
@@ -323,6 +356,8 @@ async fn run_command(
         protected_dirs,
         &secret,
         isolation::LaunchConfig {
+            #[cfg(target_os = "linux")]
+            confirm_exec: can_retry.is_some(),
             cache: cache.as_deref(),
             npm: attribute_npm,
             cargo: attribute_cargo,
@@ -341,11 +376,15 @@ async fn run_command(
         );
     }
     let mut child = command.spawn()?;
+    if let Some(allowed) = &mut can_retry {
+        **allowed = false;
+    }
     let pid = child.id();
     let mut stdout = child.stdout.take().unwrap();
     let mut stderr = child.stderr.take().unwrap();
+    let json = options.json;
     let mut stdout_task = tokio::spawn(async move {
-        if options.json {
+        if json {
             tokio::io::copy(&mut stdout, &mut tokio::io::stderr()).await
         } else {
             tokio::io::copy(&mut stdout, &mut tokio::io::stdout()).await
@@ -375,6 +414,19 @@ async fn run_command(
             infrastructure_failure = Some((124, "timed_out"));
             None
         }
+        _ = async {
+            #[cfg(target_os = "linux")]
+            if can_retry.is_some() && let Some(socket) = &capture {
+                tokio::time::sleep(isolation::PROBE_TIMEOUT).await;
+                if !isolation::linux::has_exec_marker(socket) {
+                    return;
+                }
+            }
+            std::future::pending::<()>().await
+        } => {
+            infrastructure_failure = Some((SETUP_FAILURE, "setup_failed"));
+            None
+        }
         status = child.wait() => Some(status?),
     };
     isolation::terminate_group(pid);
@@ -392,6 +444,29 @@ async fn run_command(
             .is_err()
         {
             task.abort();
+        }
+    }
+    #[cfg(target_os = "linux")]
+    if let (Some(allowed), Some(channel)) = (can_retry, &capture) {
+        // AF_UNIX datagrams are ordered. The filtered child must successfully
+        // enqueue this byte before exec, and the release target cannot consume it.
+        let mut marker = [0; 2];
+        match channel.recv(&mut marker) {
+            Ok(1) if marker[0] == isolation::linux::EXEC_MARKER => {}
+            Err(err)
+                if err.kind() == io::ErrorKind::WouldBlock
+                    && infrastructure_failure.is_none()
+                    && status.and_then(|s| s.code()).is_some_and(|c| c != 0) =>
+            {
+                *allowed = true;
+                return Err(error(
+                    "isolated launcher exited before starting the command",
+                ));
+            }
+            _ if infrastructure_failure.is_none() && status.and_then(|s| s.code()).is_some() => {
+                return Err(error("could not confirm isolated command startup"));
+            }
+            _ => {}
         }
     }
     #[cfg(target_os = "linux")]
@@ -575,7 +650,7 @@ async fn run_command(
     {
         (exit_code, reason) = (volume::OBSERVED_ANOMALY, "volume_anomaly");
     }
-    if shorthand_ci(&options)
+    if shorthand_ci(options)
         && !options.log
         && !options.save_baseline
         && comparison.is_none()

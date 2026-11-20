@@ -335,7 +335,15 @@ impl Runner<'_> {
             protected_outputs: &[self.output],
             protected_dirs: &self.protected_dirs,
         };
-        run_command(options, self.fixture, policy, self.signals, execution).await
+        run_command(
+            &options,
+            self.fixture,
+            policy,
+            self.signals,
+            execution,
+            None,
+        )
+        .await
     }
 
     async fn compare(

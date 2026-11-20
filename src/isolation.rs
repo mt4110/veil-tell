@@ -23,6 +23,8 @@ pub struct Launch {
 
 #[derive(Default)]
 pub struct LaunchConfig<'a> {
+    #[cfg(target_os = "linux")]
+    pub confirm_exec: bool,
     pub cache: Option<&'a Path>,
     pub npm: bool,
     pub cargo: bool,
@@ -176,6 +178,8 @@ pub async fn prepare(
     })
 }
 
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub async fn probe(cwd: &Path) -> Result<()> {
     let mut launch = prepare(
         Backend::Isolated,
@@ -187,8 +191,7 @@ pub async fn probe(cwd: &Path) -> Result<()> {
         LaunchConfig::default(),
     )
     .await?;
-    let output =
-        tokio::time::timeout(std::time::Duration::from_secs(5), launch.command.output()).await??;
+    let output = tokio::time::timeout(PROBE_TIMEOUT, launch.command.output()).await??;
     if output.status.success() {
         return Ok(());
     }

@@ -4,6 +4,7 @@ use super::{
 use crate::{Result, error, proxy::Listener};
 use std::ffi::OsString;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,6 +15,25 @@ use tokio::time::timeout;
 
 #[path = "linux_notify.rs"]
 mod notify;
+pub(crate) const EXEC_MARKER: u8 = b'E';
+pub(crate) fn has_exec_marker(socket: &std::os::unix::net::UnixDatagram) -> bool {
+    let mut bytes = [0u8; 2];
+    loop {
+        // Peek without disturbing the marker and the following capture datagram.
+        let n = unsafe {
+            libc::recv(
+                socket.as_raw_fd(),
+                bytes.as_mut_ptr().cast(),
+                bytes.len(),
+                libc::MSG_PEEK,
+            )
+        };
+        if n >= 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+            return n == 1 && bytes[0] == EXEC_MARKER;
+        }
+    }
+}
+
 const CAPTURE_SOCKET: &str = "/veil-tell-capture.sock";
 const RELAY_SOCKET: &str = "/veil-tell-proxy.sock";
 const DNS_HOOK: &str = "/veil-tell-node-dns.cjs";
@@ -93,6 +113,9 @@ pub async fn prepare(
         .arg("--bind")
         .arg(&child_home)
         .arg("/tmp/veil-tell-home");
+    if config.confirm_exec {
+        launch.args(["--setenv", "VEIL_TELL_CONFIRM_EXEC", "1"]);
+    }
     if let Some(cache) = config.cache
         && let Some(manager) = crate::manager::executable(command)
     {
@@ -265,12 +288,22 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
         );
     }
     let filter = filter();
-    // Only async-signal-safe kernel calls are made between fork and exec.
-    unsafe {
-        command.pre_exec(move || apply_filter(&filter));
-    }
     let feedback = std::os::unix::net::UnixDatagram::unbound()?;
     feedback.connect(CAPTURE_SOCKET)?;
+    let confirm_fd = std::env::var_os("VEIL_TELL_CONFIRM_EXEC").map(|_| feedback.as_raw_fd());
+    // The connected descriptor is close-on-exec and remains owned by the relay.
+    // Only async-signal-safe kernel calls are made between fork and exec.
+    unsafe {
+        command.pre_exec(move || {
+            apply_filter(&filter)?;
+            if let Some(fd) = confirm_fd
+                && libc::write(fd, (&EXEC_MARKER as *const u8).cast(), 1) != 1
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
     let (mut child, capture) = notify::spawn(command)?;
     let mut tunnels = JoinSet::new();
     let result = loop {

@@ -645,6 +645,39 @@ def baseline_upgrade_test(cli, project, runtime):
     print(f"fixture os={sys.platform} known_destination_missing=5 approvals=0 migration=ok")
 
 
+def linux_shorthand_startup(cli, project):
+    if sys.platform != "linux":
+        return
+    env = os.environ.copy()
+    env.pop("VEIL_TELL_BWRAP", None)
+    env.pop("CI", None)
+
+    # A running child owns its exit status, including 125. Cross the startup
+    # deadline to check that it applies only before exec and cannot replay it.
+    result = subprocess.run(
+        [cli, "--json", "/bin/sh", "-c", "echo started >> starts; sleep 6; exit 125"],
+        cwd=project, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 125 and (project / "starts").read_text() == "started\n"
+    assert json.loads(result.stdout)["backend"] == "isolated"
+    assert "observing via proxy" not in result.stderr
+
+    # A system root is not an isolatable project. Interactive shorthand can
+    # fall back after the independent probe fails. CI must stop before exec.
+    for strict in (False, True):
+        result = subprocess.run(
+            [cli, "--json", "/bin/echo", "payload-ran"], cwd="/",
+            env=dict(env, CI="1" if strict else "0"), capture_output=True, text=True,
+        )
+        if strict:
+            assert result.returncode == 125 and "payload-ran" not in result.stderr
+            assert "CI requires isolation" in result.stderr and not result.stdout
+        else:
+            assert result.returncode == 0 and json.loads(result.stdout)["backend"] == "proxy"
+            assert result.stderr.splitlines().count("payload-ran") == 1
+    print("receiver case=linux-shorthand-startup once=1 child_exit=125 fallback=proxy ci=125")
+
+
 def output_and_upstream_test(cli, project):
     def invoke(args, env=None):
         return subprocess.run([cli, *args], cwd=project, env=env, capture_output=True, text=True, timeout=12)
@@ -706,6 +739,7 @@ def run(cli, fixture, node_root=None):
         evidence = root / "evidence"
         evidence.mkdir()
         shutil.copyfile(SCRIPT, project / "probe.py")
+        linux_shorthand_startup(cli, project)
         output_and_upstream_test(cli, project)
         policies = {}
         for action in ("unknown", "allow", "deny"):
