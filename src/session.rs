@@ -130,7 +130,7 @@ pub fn shim(name: &str, args: &[OsString]) -> Result<u8> {
     Err(launch.exec().into())
 }
 
-/// Keep pipeline reads demand-driven. For terminals and other descriptors,
+/// Keep reads from pipes and read-only regular files demand-driven. For other descriptors,
 /// hand the sandbox a one-way byte stream, never a host TTY or connected socket.
 pub(super) fn shim_stdin() -> std::io::Result<OwnedFd> {
     let mut input = File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
@@ -138,7 +138,8 @@ pub(super) fn shim_stdin() -> std::io::Result<OwnedFd> {
     if flags < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    if input.metadata()?.file_type().is_fifo() && flags & libc::O_ACCMODE == libc::O_RDONLY {
+    let kind = input.metadata()?.file_type();
+    if flags & libc::O_ACCMODE == libc::O_RDONLY && (kind.is_fifo() || kind.is_file()) {
         return Ok(input.into());
     }
     let (reader, mut writer) = std::io::pipe()?;

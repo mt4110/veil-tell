@@ -193,7 +193,7 @@ veil-tell overlaps with host-level controls in LuLu, Little Snitch, and OpenSnit
 
 - **Linux** requires non-setuid bubblewrap and unprivileged user namespaces. The default path is `/usr/bin/bwrap`. Set `VEIL_TELL_BWRAP` to a trusted absolute path to use a different installation. The working directory is writable. Standard runtime directories and the Nix store are read-only.
 - **macOS** uses the deprecated `/usr/bin/sandbox-exec`. It limits outbound IPv4/TCP to the run's localhost proxy port and denies named Mach service lookup and registration. Receiver tests on macOS 27.2 arm64 covered `CFMessagePort` and an app-bundled XPC service relaying to TCP. On the same OS, tested unicast DNS queries including A and AAAA via `getaddrinfo()` and TXT and KEY via `DNSServiceQueryRecord()` did not reach the authoritative server under isolation.
-- Isolated runs use a temporary home and a reduced environment. Standard input is normally closed. Shims installed by `agent-env` or `agent --` pass input through, so commands such as `curl --config -` can read a pipeline. Terminal input is passed as a byte stream. Keep policy and report files outside the working directory. Choose a new report path for each run.
+- Isolated runs use a temporary home and a reduced environment. Standard input is normally closed. Shims installed by `agent-env` or `agent --` pass input through, so commands such as `curl --config -` can read a pipeline. A regular file redirected read-only is inherited with its shared file offset. Terminal input is passed as a byte stream. Keep policy and report files outside the working directory. Choose a new report path for each run.
 
 ## Try isolation and exit code `20` on Ubuntu
 

@@ -120,6 +120,15 @@ def trial(fixture, node_root, cache=False):
             assert requests.count("/from-stdin") == start + 2
             direct = run([fixture, "--log", "--", *from_stdin], input=config, code=None)
             assert direct.returncode != 0 and requests.count("/from-stdin") == start + 2
+            # Both commands share the shell's redirected file description.
+            # curl --version should leave even a nonzero starting offset untouched.
+            source = root / "input.txt"
+            source.write_bytes(b"prefix:remaining input\n")
+            with source.open("rb") as stream:
+                stream.seek(len(b"prefix:"))
+                result = subprocess.run(["/bin/sh", "-c", setup + "\ncurl --version >/dev/null && cat"],
+                                        cwd=project, env=env, stdin=stream, capture_output=True, timeout=10)
+                assert result.returncode == 0 and result.stdout == b"remaining input\n", (result.stdout, result.stderr)
             # A terminal supplies bytes and EOF to the supervised process as well.
             master, slave = pty.openpty()
             try:

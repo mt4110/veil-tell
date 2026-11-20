@@ -193,7 +193,7 @@ LuLu・Little Snitch・OpenSnitch のホスト側制御、Firejail のプロセ�
 
 - **Linux** は非 setuid の bubblewrap と非特権 user namespace が必要です。既定のパスは `/usr/bin/bwrap` で、`VEIL_TELL_BWRAP` に信頼できる絶対パスを指定できます。作業ディレクトリは書き込み可能で、標準のランタイムディレクトリと Nix store は読み取り専用です。
 - **macOS** は非推奨の `/usr/bin/sandbox-exec` を使います。外向きの IPv4/TCP は実行専用の localhost プロキシポートに限定し、名前付き Mach サービスの検索と登録を拒否します。macOS 27.2 arm64 の受信試験では `CFMessagePort` とアプリ同梱 XPC サービスの TCP 中継を確認しました。同じ環境で、`getaddrinfo()` の A・AAAA と `DNSServiceQueryRecord()` の TXT・KEY などをユニキャスト DNS で試し、隔離時は権威 DNS に届きませんでした。
-- 隔離時は一時的なホームと絞った環境変数を使います。標準入力は通常閉じますが、`agent-env` や `agent --` の shim は呼び出し元の入力を渡すので、`curl --config -` などにパイプできます。端末からの入力もバイト列として渡します。ポリシーとレポートは作業ディレクトリの外に置きます。レポートは実行ごとに未使用のパスを指定してください。
+- 隔離時は一時的なホームと絞った環境変数を使います。標準入力は通常閉じますが、`agent-env` や `agent --` の shim は呼び出し元の入力を渡すので、`curl --config -` などにパイプできます。読み取り専用で渡した通常ファイルは子と読み取り位置を共有します。端末からの入力はバイト列として渡します。ポリシーとレポートは作業ディレクトリの外に置きます。レポートは実行ごとに未使用のパスを指定してください。
 
 ## Ubuntu で隔離と終了コード `20` を試す
 
