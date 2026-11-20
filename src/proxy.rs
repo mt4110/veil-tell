@@ -401,6 +401,7 @@ where
             resolver_hint: None,
             via_upstream_proxy: false,
             connected_ip: None,
+            tunnel_established: false,
             attempts: 1,
             sent_bytes: 0,
             max_connection_bytes: 0,
@@ -459,6 +460,7 @@ where
         exchange.event.connected_ip = Some(address.ip());
         upstream
     };
+    exchange.event.tunnel_established = true;
     timeout(
         CONNECT_LIMIT,
         stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n"),

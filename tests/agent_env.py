@@ -120,7 +120,7 @@ def trial(fixture, node_root, cache=False):
             assert requests.count("/from-stdin") == start + 2
             direct = run([fixture, "--log", "--", *from_stdin], input=config, code=None)
             assert direct.returncode != 0 and requests.count("/from-stdin") == start + 2
-            # Both commands share the shell's redirected file description.
+            # The following shell command resumes at the redirected file's cursor.
             # curl --version should leave even a nonzero starting offset untouched.
             source = root / "input.txt"
             source.write_bytes(b"prefix:remaining input\n")
@@ -131,6 +131,24 @@ def trial(fixture, node_root, cache=False):
                 result = subprocess.run(["/bin/sh", "-c", setup + "\ncurl --version >/dev/null && cat"],
                                         cwd=project, env=file_env, stdin=stream, capture_output=True, timeout=10)
                 assert result.returncode == 0 and result.stdout == b"remaining input\n", (result.stdout, result.stderr)
+            if sys.platform == "linux":
+                checker = project / "read_stdin.py"
+                checker.write_text(
+                    "import os, stat, sys\n"
+                    "assert stat.S_ISREG(os.fstat(0).st_mode)\n"
+                    "assert os.fstatvfs(0).f_flag & os.ST_RDONLY\n"
+                    "assert os.lseek(0, 0, os.SEEK_CUR) == 7\n"
+                    "assert os.read(0, 3) == b'rem'\n"
+                    "sys.exit(17)\n"
+                )
+                with source.open("rb", buffering=0) as stream:
+                    stream.seek(7)
+                    result = subprocess.run(["/bin/sh", "-c", setup + '\nexec "$@"', "test", "git",
+                                             "-c", "alias.checkinput=!python3 read_stdin.py", "checkinput"],
+                                            cwd=project, env=file_env, stdin=stream, capture_output=True, timeout=10)
+                    assert result.returncode == 17, (result.stdout, result.stderr)
+                    assert stream.read() == b"aining input\n"
+                assert source.read_bytes() == b"prefix:remaining input\n"
             # A terminal supplies bytes and EOF to the supervised process as well.
             master, slave = pty.openpty()
             try:

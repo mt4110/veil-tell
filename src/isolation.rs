@@ -1,6 +1,7 @@
 use crate::{Result, cli::Backend, error, proxy::Listener};
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -17,12 +18,15 @@ pub struct Launch {
     // Retain the private home or Unix socket directory until the session ends.
     pub temporary: Option<tempfile::TempDir>,
     #[cfg(target_os = "linux")]
+    pub file_stdin: Option<linux::stdin::FileInput>,
+    #[cfg(target_os = "linux")]
     pub capture: Option<std::os::unix::net::UnixDatagram>,
     pub npm_wrapper: Option<tempfile::TempDir>,
 }
 
 #[derive(Default)]
 pub struct LaunchConfig<'a> {
+    pub stdin: Option<&'a OwnedFd>,
     #[cfg(target_os = "linux")]
     pub confirm_exec: bool,
     pub cache: Option<&'a Path>,
@@ -168,12 +172,17 @@ pub async fn prepare(
         crate::cargo_attribution::configure(&mut launch, rustc, cwd);
     }
     supervise_stdio(&mut launch);
+    if let Some(input) = config.stdin {
+        launch.stdin(input.try_clone()?);
+    }
     Ok(Launch {
         listener: Listener::Tcp(listener),
         command: launch,
         temporary,
         #[cfg(target_os = "linux")]
         capture: None,
+        #[cfg(target_os = "linux")]
+        file_stdin: None,
         npm_wrapper: wrapper,
     })
 }

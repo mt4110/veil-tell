@@ -447,6 +447,7 @@ dependencies = [
  "httparse",
  "json5",
  "libc",
+ "rustix",
  "serde",
  "serde_json",
  "serde_yaml_ng",

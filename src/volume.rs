@@ -113,7 +113,7 @@ pub fn anomalies(
 ) -> Vec<Anomaly> {
     let mut found = BTreeMap::new();
     for event in events {
-        if event.connected_ip.is_none() && event.result != "volume_blocked" {
+        if !event.tunnel_established && event.result != "volume_blocked" {
             continue;
         }
         let Some(budget) = budgets.get(&event.host) else {

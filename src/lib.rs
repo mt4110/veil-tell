@@ -353,6 +353,8 @@ async fn run_command(
         mut command,
         #[cfg(target_os = "linux")]
         capture,
+        #[cfg(target_os = "linux")]
+        file_stdin,
         temporary: _temporary,
         npm_wrapper: _npm_wrapper,
     } = isolation::prepare(
@@ -363,6 +365,7 @@ async fn run_command(
         protected_dirs,
         &secret,
         isolation::LaunchConfig {
+            stdin,
             #[cfg(target_os = "linux")]
             confirm_exec: can_retry.is_some(),
             cache: cache.as_deref(),
@@ -381,9 +384,6 @@ async fn run_command(
         eprintln!(
             "veil-tell: observing HTTP CONNECT requests from clients that use the local proxy. Direct connection attempts are outside the capture scope."
         );
-    }
-    if let Some(input) = stdin {
-        command.stdin(input.try_clone()?);
     }
     let mut child = command.spawn()?;
     if let Some(allowed) = &mut can_retry {
@@ -444,6 +444,8 @@ async fn run_command(
         Some(status) => Some(status),
         None => child.wait().await.ok(),
     };
+    #[cfg(target_os = "linux")]
+    let cursor = file_stdin.map(|input| input.finish(status.is_some_and(|s| s.success())));
     let _ = stop.send(());
     if !proxy_ended && !matches!(proxy_task.await, Ok(Ok(()))) {
         infrastructure_failure = Some((SETUP_FAILURE, "proxy_stopped"));
@@ -456,6 +458,8 @@ async fn run_command(
             task.abort();
         }
     }
+    #[cfg(target_os = "linux")]
+    cursor.transpose()?;
     #[cfg(target_os = "linux")]
     if let (Some(allowed), Some(channel)) = (can_retry, &capture) {
         // AF_UNIX datagrams are ordered. The filtered child must successfully

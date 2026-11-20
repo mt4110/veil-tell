@@ -239,11 +239,21 @@ def action_summary(report):
     return subprocess.check_output([sys.executable, renderer, report], text=True)
 
 
-def volume_test(fixture, project, evidence, node_root):
+def upstream_connect(stream):
+    request = stream.readline()
+    for line in stream:
+        if line == b"\r\n":
+            return request
+    raise AssertionError("incomplete upstream CONNECT request")
+
+
+def volume_test(cli, fixture, project, evidence, node_root):
     policy = evidence / "volume.toml"
     policy.write_text('version = 1\nprofile = "volume"\n[[rule]]\n'
                       'action = "allow"\nhost = "allowed.test"\nport = 443\nmax_sent_bytes = 8192\n')
     baseline = evidence / "volume-baseline.json"
+    upstream_baseline = evidence / "upstream-volume-baseline.json"
+    refused_baseline = evidence / "upstream-refused-baseline.json"
     with socket.socket() as receiver:
         receiver.bind((os.environ.get("VEIL_TELL_TEST_IP", "127.0.0.1"), 0))
         receiver.listen()
@@ -256,6 +266,10 @@ def volume_test(fixture, project, evidence, node_root):
             ("no-baseline", ["observe"], 524288, 524288, 0),
             ("restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
             ("ci", ["ci", "--baseline", baseline], 524288, 131072, 22),
+            ("upstream-train", ["observe", "--baseline-out", upstream_baseline], 4096, 4096, 0),
+            ("upstream-observe", ["observe", "--baseline", upstream_baseline], 524288, 524288, 21),
+            ("upstream-ci", ["ci", "--baseline", upstream_baseline], 524288, 131072, 22),
+            ("upstream-refused", ["observe", "--baseline-out", refused_baseline], 0, 0, 0),
         ]
         if node_root:
             demo = project / "volume-demo"
@@ -275,12 +289,22 @@ def volume_test(fixture, project, evidence, node_root):
             ])
 
         for name, arguments, sent, expected, code in cases:
+            via_upstream = name.startswith("upstream-")
+            refused = name == "upstream-refused"
             received = []
 
             def collect():
                 conn, _ = receiver.accept()
                 with conn, conn.makefile("rb") as data:
                     conn.settimeout(4)
+                    if via_upstream:
+                        host = "new.test" if refused else "allowed.test"
+                        assert upstream_connect(data) == f"CONNECT {host}:443 HTTP/1.1\r\n".encode()
+                        if refused:
+                            conn.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                            received.append(len(data.read()))
+                            return
+                        conn.sendall(b"HTTP/1.1 200 Established\r\n\r\n")
                     received.append(len(data.read()))
                     try:
                         conn.sendall(b"ACK")
@@ -298,23 +322,40 @@ def volume_test(fixture, project, evidence, node_root):
                         "scripts": {"postinstall": f"{sys.executable} -B probe.py volume {sent}"},
                     }))
                     command = ["npm", "install", "--no-audit", "--no-fund", "--no-update-notifier"]
+                elif refused:
+                    command = [sys.executable, "-B", "probe.py", "new-destination"]
                 else:
                     command = [sys.executable, "-B", "probe.py", "volume", str(sent)]
                 child = subprocess.run(
-                    [fixture, *arguments, *([] if arguments[0] == "ci" else ["--backend", "isolated"]),
+                    [cli if via_upstream else fixture, *arguments,
+                     *([] if arguments[0] == "ci" else ["--backend", "isolated"]),
                      "--report", report, "--", *command],
                     cwd=demo if install else project,
-                    env=env, capture_output=True, text=True, timeout=12,
+                    env=dict(env, HTTPS_PROXY=f"http://{address}", NO_PROXY="") if via_upstream else env,
+                    capture_output=True, text=True, timeout=12,
                 )
             finally:
                 thread.join()
             assert child.returncode == code and received == [expected], (child.stderr, received)
             result = json.loads(report.read_text())
             assert result["child_status"]["exit_code"] == 0, (child.stdout, child.stderr, result)
-            assert result["destinations"][0]["sent_bytes"] == expected
+            destination, = result["destinations"]
+            assert destination["sent_bytes"] == expected, destination
+            if via_upstream:
+                assert destination["via_upstream_proxy"] and destination["connected_ip"] is None, destination
+            if name == "upstream-train":
+                assert json.loads(upstream_baseline.read_text())["volume"]["allowed.test"] == {
+                    "sent_bytes": expected, "max_connection_bytes": expected, "connections": 1,
+                }
+            if refused:
+                assert destination["result"] == "connect_failed", destination
+                assert not json.loads(refused_baseline.read_text()).get("volume")
             if code:
                 anomaly, = result["volume_anomalies"]
                 assert anomaly["blocked"] == (code == 22), result
+                assert anomaly["observed"] == {
+                    "sent_bytes": expected, "max_connection_bytes": expected, "connections": 1,
+                }, anomaly
                 assert result["run_status"]["reason"] == (
                     "volume_limit_exceeded" if code == 22 else "volume_anomaly"
                 ), result
@@ -813,7 +854,7 @@ def run(cli, fixture, node_root=None):
             assert child.returncode == 0 and "EBADF" in child.stdout, (child.stdout, child.stderr)
             assert receive(receiver, 1) == [b""]
             print("receiver case=inherited-fd connections=1 payload_bytes=0 errno=EBADF")
-        volume_test(fixture, project, evidence, node_root)
+        volume_test(cli, fixture, project, evidence, node_root)
         destination_diff_test(cli, fixture, project, evidence, node_root)
         if node_root:
             npm_test(fixture, Path(node_root).resolve(), project, evidence, policies["allow"], ip)

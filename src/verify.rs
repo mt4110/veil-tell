@@ -150,7 +150,7 @@ impl Trial {
                 && (matches!(
                     event.reason,
                     "unknown_destination" | "non_public_destination"
-                ) || event.decision == "allow" && event.connected_ip.is_none())
+                ) || event.decision == "allow" && !event.tunnel_established)
         }) {
             return Err(("other_destination_unavailable", 2));
         }

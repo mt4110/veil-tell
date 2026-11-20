@@ -15,6 +15,8 @@ use tokio::time::timeout;
 
 #[path = "linux_notify.rs"]
 mod notify;
+#[path = "linux_stdin.rs"]
+pub mod stdin;
 pub(crate) const EXEC_MARKER: u8 = b'E';
 pub(crate) fn has_exec_marker(socket: &std::os::unix::net::UnixDatagram) -> bool {
     let mut bytes = [0u8; 2];
@@ -215,6 +217,8 @@ pub async fn prepare(
             launch.args(["--setenv", "VEIL_TELL_RELAY_COREPACK_CACHE", COREPACK_CACHE]);
         }
     }
+    supervise_stdio(&mut launch);
+    let file_stdin = stdin::FileInput::prepare(&mut launch, config.stdin, temporary.path())?;
     launch
         .arg("--ro-bind")
         .arg(capture_path)
@@ -229,8 +233,8 @@ pub async fn prepare(
         .arg(cwd)
         .args(["--", RELAY_PROGRAM, "__veil_tell_linux_relay", secret])
         .args(command);
-    supervise_stdio(&mut launch);
     Ok(Launch {
+        file_stdin,
         listener: Listener::Unix(listener),
         command: launch,
         temporary: Some(temporary),
@@ -287,6 +291,7 @@ pub async fn inside(secret: &str, args: &[OsString]) -> Result<u8> {
             &std::env::current_dir()?,
         );
     }
+    stdin::attach(&mut command)?;
     let filter = filter();
     let feedback = std::os::unix::net::UnixDatagram::unbound()?;
     feedback.connect(CAPTURE_SOCKET)?;

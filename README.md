@@ -61,7 +61,7 @@ veil-tell 自体はテレメトリーを送りません。履歴はローカル�
 
 - Node.js の `fetch` と `https.get` は 22 系では 22.21 から、24 系では 24.5 から両方が環境プロキシに対応します。独自のクライアントエージェントは別の経路を選べます。[Node.js のプロキシ対応](https://nodejs.org/learn/http/enterprise-network-configuration)
 - DNS の解決先がすべて 198.18.0.0/15 なら fake-IP の可能性があります。信頼する TUN 環境だけで `VEIL_TELL_ALLOW_FAKE_IP=1` を指定してください。混在・ローカル宛先は引き続き拒否します。
-- `HTTPS_PROXY` または `https_proxy` が HTTP プロキシなら、許可した CONNECT をそこへ中継します。この経路の名前解決・接続先アドレス検査は上流側が担います。`NO_PROXY` はホスト名・ドメイン接尾辞・任意の `:443`・`*` に対応します。
+- `HTTPS_PROXY` または `https_proxy` が HTTP プロキシなら、許可した CONNECT をそこへ中継します。この経路の名前解決・接続先アドレス検査は上流側が担います。接続先 IP が不明でも、成立したトンネルは通信量の基準と CI の判定に含まれます。`NO_PROXY` はホスト名・ドメイン接尾辞・任意の `:443`・`*` に対応します。
 - macOS の隔離中に `curl: (60) ... unable to get local issuer certificate` が出たら、その宛先の証明書チェーンを検証できる、信頼済みの CA バンドルを `curl --cacert /path/to/ca-bundle.pem` で指定してください。CONNECT が許可された後でも、TLS の証明書検証は失敗することがあります。
 - `VEIL_TELL_CACHE=persistent` で、隔離内に専用の `~/.cache/veil-tell/<manager>` を用意します。キャッシュ命中で消えた宛先は情報扱いです。pnpm は従来のプロジェクトストア設定も使います。
 - 一時ホームで npm・pnpm・Yarn が失敗したときは、そこにある既知のログを合計 1 MiB まで調べます。マネージャー名、検出した既知のエラーコードと説明、npm の既知のシステムコール名だけを `.veil-tell/logs/<日時>-<識別子>/manager.log` に保存し、パスを表示します。たとえば `ENOENT` と `syscall: open` で、ファイルを開く際のエラーを確認できます。パスや引数を含むログ本文はコピーしません。プロジェクトの `.gitignore` に `/.veil-tell/logs/` と `/.veil-tell/pending.json` を追加してください。
@@ -193,7 +193,7 @@ LuLu・Little Snitch・OpenSnitch のホスト側制御、Firejail のプロセ�
 
 - **Linux** は非 setuid の bubblewrap と非特権 user namespace が必要です。既定のパスは `/usr/bin/bwrap` で、`VEIL_TELL_BWRAP` に信頼できる絶対パスを指定できます。作業ディレクトリは書き込み可能で、標準のランタイムディレクトリと Nix store は読み取り専用です。
 - **macOS** は非推奨の `/usr/bin/sandbox-exec` を使います。外向きの IPv4/TCP は実行専用の localhost プロキシポートに限定し、名前付き Mach サービスの検索と登録を拒否します。macOS 27.2 arm64 の受信試験では `CFMessagePort` とアプリ同梱 XPC サービスの TCP 中継を確認しました。同じ環境で、`getaddrinfo()` の A・AAAA と `DNSServiceQueryRecord()` の TXT・KEY などをユニキャスト DNS で試し、隔離時は権威 DNS に届きませんでした。
-- 隔離時は一時的なホームと絞った環境変数を使います。標準入力は通常閉じますが、`agent-env` や `agent --` の shim は呼び出し元の入力を渡すので、`curl --config -` などにパイプできます。読み取り専用で渡した通常ファイルは子と読み取り位置を共有します。端末からの入力はバイト列として渡します。ポリシーとレポートは作業ディレクトリの外に置きます。レポートは実行ごとに未使用のパスを指定してください。
+- 隔離時は一時的なホームと絞った環境変数を使います。標準入力は通常閉じますが、`agent-env` や `agent --` の shim は呼び出し元の入力を渡すので、`curl --config -` などにパイプできます。Linux の隔離では、読み取り専用で渡す通常ファイルに有効なパスが必要です。子は読み取り専用マウントで必要な分を読み、終了時にシェルの読み取り位置を更新します。実行中は同じ入力を別のプロセスから操作しないでください。端末からの入力はバイト列として渡します。ポリシーとレポートは作業ディレクトリの外に置きます。レポートは実行ごとに未使用のパスを指定してください。
 
 ## Ubuntu で隔離と終了コード `20` を試す
 

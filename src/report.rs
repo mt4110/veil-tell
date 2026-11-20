@@ -29,6 +29,9 @@ pub struct Destination {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub via_upstream_proxy: bool,
     pub connected_ip: Option<IpAddr>,
+    // An upstream CONNECT can succeed without revealing the destination IP.
+    #[serde(skip)]
+    pub tunnel_established: bool,
     pub attempts: u64,
     pub sent_bytes: u64,
     pub max_connection_bytes: u64,
@@ -45,6 +48,7 @@ type DestinationKey = (
     &'static str,
     Option<IpAddr>,
     Option<&'static str>,
+    bool,
 );
 
 #[derive(Default)]
@@ -60,6 +64,7 @@ impl Records {
             event.result,
             event.connected_ip,
             event.resolver_hint,
+            event.tunnel_established,
         );
         let mut records = self.0.lock().unwrap();
         if records.len() >= 4096 && !records.contains_key(&key) {
@@ -227,6 +232,7 @@ mod tests {
             resolver_hint: None,
             via_upstream_proxy: false,
             connected_ip: Some("192.0.2.1".parse().unwrap()),
+            tunnel_established: true,
             attempts: 2,
             sent_bytes: 50,
             max_connection_bytes: 30,

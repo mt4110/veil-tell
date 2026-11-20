@@ -75,7 +75,7 @@ impl Baseline {
         let mut volume = BTreeMap::<String, crate::volume::Sample>::new();
         let mut counts = BTreeMap::<_, Endpoint>::new();
         for event in events {
-            if event.connected_ip.is_some() {
+            if event.tunnel_established {
                 volume.entry(event.host.clone()).or_default().record(event);
             }
             let endpoint = counts
@@ -862,7 +862,8 @@ mod tests {
             result: "completed",
             resolver_hint: None,
             via_upstream_proxy: false,
-            connected_ip: None,
+            connected_ip: Some("192.0.2.1".parse().unwrap()),
+            tunnel_established: true,
             attempts,
             sent_bytes: 0,
             max_connection_bytes: 0,
