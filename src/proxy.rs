@@ -54,6 +54,7 @@ impl DnsAttempts {
 
 pub struct Proxy {
     pub mode: Mode,
+    pub shared_read_idle: Option<Duration>,
     pub policy: Policy,
     pub ci_hosts: Option<std::collections::BTreeSet<String>>,
     pub auth: String,
@@ -465,6 +466,7 @@ where
     .await??;
     let (mut incoming, mut outgoing) = tokio::io::split(stream);
     let (mut from_upstream, mut to_upstream) = upstream.split();
+    let activity = state.shared_read_idle.map(TunnelActivity::new);
     let event = &mut exchange.event;
     let result = tokio::try_join!(
         pump(
@@ -473,6 +475,7 @@ where
             &bytes[consumed..],
             &mut event.sent_bytes,
             budget,
+            activity.as_ref(),
         ),
         pump(
             &mut from_upstream,
@@ -480,6 +483,7 @@ where
             &[],
             &mut event.received_bytes,
             None,
+            activity.as_ref(),
         ),
     );
     event.result = if result.as_ref().err().is_some_and(|err| {
@@ -575,17 +579,60 @@ async fn connect(addresses: Vec<SocketAddr>) -> io::Result<(TcpStream, SocketAdd
     Err(last_error)
 }
 
+// API responses can stream for minutes after the last client upload. Each
+// read waits until neither direction has received data for the full interval.
+struct TunnelActivity {
+    deadline: std::sync::Mutex<tokio::time::Instant>,
+    idle: Duration,
+}
+
+impl TunnelActivity {
+    fn new(idle: Duration) -> Self {
+        Self {
+            deadline: std::sync::Mutex::new(tokio::time::Instant::now() + idle),
+            idle,
+        }
+    }
+
+    async fn read(
+        &self,
+        reader: &mut (impl AsyncRead + Unpin),
+        buffer: &mut [u8],
+    ) -> io::Result<usize> {
+        loop {
+            let deadline = *self.deadline.lock().unwrap();
+            match tokio::time::timeout_at(deadline, reader.read(buffer)).await {
+                Ok(result) => {
+                    let count = result?;
+                    if count != 0 {
+                        *self.deadline.lock().unwrap() = tokio::time::Instant::now() + self.idle;
+                    }
+                    return Ok(count);
+                }
+                Err(elapsed) if *self.deadline.lock().unwrap() <= tokio::time::Instant::now() => {
+                    return Err(elapsed.into());
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
 async fn pump(
     reader: &mut (impl AsyncRead + Unpin),
     writer: &mut (impl AsyncWrite + Unpin),
     prefix: &[u8],
     count: &mut u64,
     budget: Option<&crate::volume::Budget>,
+    activity: Option<&TunnelActivity>,
 ) -> io::Result<()> {
     transfer(writer, prefix, count, budget).await?;
     let mut buffer = [0; 8192];
     loop {
-        let length = timeout(IDLE_LIMIT, reader.read(&mut buffer)).await??;
+        let length = match activity {
+            Some(activity) => activity.read(reader, &mut buffer).await?,
+            None => timeout(IDLE_LIMIT, reader.read(&mut buffer)).await??,
+        };
         if length == 0 {
             return writer.shutdown().await;
         }
@@ -649,6 +696,27 @@ pub fn host_interfaces() -> Result<Vec<IpAddr>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn one_way_stream_keeps_agent_tunnel_alive_until_both_directions_idle() {
+        let idle = Duration::from_millis(200);
+        let activity = TunnelActivity::new(idle);
+        let (mut upload, _client) = tokio::io::duplex(16);
+        let (mut download, mut server) = tokio::io::duplex(16);
+        let mut request = [0];
+        let pending = activity.read(&mut upload, &mut request);
+        tokio::pin!(pending);
+        for _ in 0..12 {
+            tokio::select! {
+                result = &mut pending => panic!("active stream timed out: {result:?}"),
+                _ = tokio::time::sleep(idle / 8) => {}
+            }
+            server.write_all(b"x").await.unwrap();
+            assert_eq!(activity.read(&mut download, &mut [0]).await.unwrap(), 1);
+        }
+        let result = timeout(2 * idle, pending).await.unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+    }
 
     #[test]
     fn dns_records_are_bounded_by_distinct_names_and_total_attempts() {

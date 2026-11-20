@@ -4,19 +4,38 @@
 
 ## Use with an AI agent
 
-In the project shell, load the shims, then launch Claude Code (`claude`), Codex (`codex`), or Cursor CLI (`agent`). Commands that inherit this PATH, including npm, curl and git, run through veil-tell. Check with `command -v npm` inside the agent's terminal. Absolute executable paths, shell aliases and the agent's own API client can operate outside these shims. [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
+Launch one CLI from the project shell. It keeps its terminal and authentication environment. After exiting the agent, read the history in the same shell. [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
 
 ```sh
-eval "$(veil-tell agent-env --shell zsh)"
-claude
-# codex
-# agent
-veil-tell log --today --only-blocked
+veil-tell agent -- claude
+# veil-tell agent -- codex
+# veil-tell agent -- agent    # Cursor CLI
+veil-tell log --today
 ```
+
+`agent --` runs without isolation and observes CONNECT requests to port 443 from clients that use the HTTPS environment proxy. At exit, the session row lists bytes sent to each destination and connection counts. It omits launch arguments, prompts, authorization headers and TLS contents. Descendants using the same proxy contribute to this row. The launcher also puts the 12 shims on PATH. Commands such as npm and curl that run through a shim get their own rows. Use `veil-tell log --today --only-blocked` to see denials.
+
+Direct connections, `NO_PROXY` exclusions, custom proxy settings and already-running GUI processes can fall outside session coverage. An empty row means the session proxy recorded zero CONNECT requests. If your environment requires an upstream proxy, the launcher supports an `http://` CONNECT proxy.
+
+To install only the child-command shims, run `eval "$(veil-tell agent-env --shell zsh)"`, then start `claude`, `codex` or `agent`. Check `command -v npm` in the agent's terminal to see the selected executable. Absolute executable paths and shell aliases can bypass PATH shims.
 
 For the Bash tool in Claude Code, a `SessionStart` command hook can run `veil-tell agent-env --shell bash >> "$CLAUDE_ENV_FILE"`. [Claude Code environment hooks](https://code.claude.com/docs/en/hooks#persist-environment-variables)
 
-These are actual shim runs of Puppeteer 25.17.0 with `CI=true` and a reviewed registry-only baseline. The command ran in a shell on each OS. ✓ identifies an allowed CONNECT. Bytes count data forwarded through the TLS tunnel. A denied CONNECT has zero forwarded bytes, while the amount the child intended to send is unknown.
+### Codex API traffic on macOS
+
+Codex CLI 0.155.1 sent one turn to a local mock API and received a reply. The mock received one POST to `/v1/responses`. The local upstream refused CONNECT requests to the other three hosts. Zero bytes were forwarded to those destinations. This trial used no provider account or paid API.
+
+```text
+00:29:00  agent -- codex  exit 0
+          ✓ allowed.test:443  ×1  39465 B  observe
+          ! api.github.com:443  ×1  0 B  observe [connect_failed]
+          ! chatgpt.com:443  ×2  0 B  observe [connect_failed]
+          ! github.com:443  ×1  0 B  observe [connect_failed]
+```
+
+### npm install traffic on macOS and Linux
+
+These are actual shim runs of Puppeteer 25.17.0 with `CI=true` and a reviewed registry-only baseline. The command ran in a shell on each OS. ✓ identifies an allowed CONNECT. Bytes count data sent to the destination through the TLS tunnel. A denied CONNECT has zero forwarded bytes, while the amount the child intended to send is unknown.
 
 macOS 27.2.1 arm64
 
@@ -44,7 +63,8 @@ veil-tell sends no telemetry. Session history stays under `$XDG_STATE_HOME/veil-
 - An all-198.18.0.0/15 DNS answer may indicate a fake-IP resolver. In a trusted TUN environment set `VEIL_TELL_ALLOW_FAKE_IP=1`. Mixed and local answers remain denied.
 - An HTTP proxy in `HTTPS_PROXY` or `https_proxy` receives allowed CONNECTs. For those tunnels the upstream controls DNS and destination address checks. `NO_PROXY` supports host/domain suffixes, optional `:443` and `*`.
 - If isolated curl on macOS reports `curl: (60) ... unable to get local issuer certificate`, pass a trusted CA bundle that verifies the destination’s certificate chain with `curl --cacert /path/to/ca-bundle.pem`. TLS certificate validation can fail after an allowed CONNECT.
-- `VEIL_TELL_CACHE=persistent` enables a separate cache under `~/.cache/veil-tell/<manager>` in isolation. A destination absent after a cache hit is informational. Keep the pnpm project's existing store setting. When recognized error codes are available in temporary manager logs, veil-tell saves diagnostic output under `.veil-tell/logs/`. Exclude that directory from Git.
+- `VEIL_TELL_CACHE=persistent` enables a separate cache under `~/.cache/veil-tell/<manager>` in isolation. A destination absent after a cache hit is informational. Keep the pnpm project's existing store setting.
+- When npm, pnpm or Yarn fails with a temporary home, veil-tell scans up to 1 MiB in total from known logs in that home. It prints the path to `.veil-tell/logs/<timestamp>-<id>/manager.log`, which contains the manager name, recognized error codes with descriptions, and recognized npm syscall names. For example, `ENOENT` and `syscall: open` identify a failed attempt to open a file. Raw log lines, including paths and arguments, are omitted. Add `/.veil-tell/logs/` and `/.veil-tell/pending.json` to the project’s `.gitignore`.
 
 ## Quick start
 

@@ -15,6 +15,10 @@ impl Upstream {
         let Ok(url) = std::env::var("HTTPS_PROXY").or_else(|_| std::env::var("https_proxy")) else {
             return Ok(None);
         };
+        Self::from_url(&url)
+    }
+
+    pub fn from_url(url: &str) -> Result<Option<Self>> {
         let Some(authority) = url.strip_prefix("http://") else {
             return Ok(None);
         };

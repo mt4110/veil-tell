@@ -94,6 +94,11 @@ pub fn aggregate(events: &[Destination]) -> Vec<Destination> {
             .and_modify(|row: &mut Destination| {
                 row.attempts += e.attempts;
                 row.sent_bytes += e.sent_bytes;
+                row.received_bytes += e.received_bytes;
+                row.max_connection_bytes = row.max_connection_bytes.max(e.max_connection_bytes);
+                if row.result != e.result {
+                    row.result = "mixed";
+                }
                 for source in &e.attribution {
                     crate::attribution::record(&mut row.attribution, source.clone());
                 }
@@ -237,6 +242,7 @@ mod tests {
         };
         let rows = aggregate(&[first, second]);
         assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result, "mixed");
         assert_eq!((rows[0].attempts, rows[0].sent_bytes), (3, 62));
     }
 }

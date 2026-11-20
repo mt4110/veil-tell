@@ -4,6 +4,9 @@ import hashlib
 import io
 import json
 import os
+import pty
+import select
+import signal
 from pathlib import Path
 import shutil
 import ssl
@@ -26,7 +29,7 @@ def trial(fixture, node_root, cache=False):
         ca = project / "registry.crt"
         key = root / "key.pem"
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
-                        "-subj", "/CN=allowed.test", "-addext", "subjectAltName=DNS:allowed.test",
+                        "-subj", "/CN=allowed.test", "-addext", "subjectAltName=DNS:allowed.test,DNS:new.test,IP:127.0.0.1",
                         "-keyout", key, "-out", ca], check=True, capture_output=True)
         pkg = {"name": "sample", "version": "1.0.0"}
         data = json.dumps(pkg).encode()
@@ -122,8 +125,87 @@ def trial(fixture, node_root, cache=False):
             assert not expired.exists() and unrelated.read_text() == "keep"
             failed = json.loads(path.read_text().splitlines()[-1])
             assert failed["run_status"]["reason"] == "setup_failed" and failed["coverage"] is None
+            project_agent = project / "agent-install"
+            project_agent.mkdir()
+            (project_agent / "package.json").write_text('{"name":"agent-install","version":"1.0.0"}')
+            agent = project / "fixture-agent.cjs"
+            agent.write_text("""
+const {readFileSync} = require('node:fs');
+const {execFileSync} = require('node:child_process');
+(async () => {
+  if (readFileSync(0, 'utf8') !== 'interactive input' || process.argv[2] !== 'private prompt') process.exit(2);
+  for (const url of [process.env.LOCAL_URL, 'https://new.test/api?key=private-query']) {
+    const response = await fetch(url, {headers: {Authorization: 'Bearer private-api-key'}});
+    if (!response.ok) process.exit(3);
+    await response.text();
+  }
+  execFileSync('npm', process.argv.slice(3), {stdio:'inherit'});
+  console.log('agent output');
+})().catch(e => {console.error(e);process.exit(4)});
+""")
+            # This local CONNECT proxy terminates the fixture TLS connection itself.
+            # Both collectors must use it exactly once per CONNECT, with the original credentials.
+            tunnels = []
+            class Upstream(BaseHTTPRequestHandler):
+                def do_CONNECT(self):
+                    if self.path not in ("new.test:443", "allowed.test:443") or self.headers.get("Proxy-Authorization") != "Basic " + base64.b64encode(b"fixture:private-upstream").decode():
+                        self.send_error(403)
+                        return
+                    tunnels.append(self.path)
+                    self.send_response(200)
+                    self.end_headers()
+                    with tls.wrap_socket(self.connection, server_side=True) as connection:
+                        Registry(connection, self.client_address, self.server)
+
+                def log_message(self, *_):
+                    pass
+
+            with ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as upstream:
+                threading.Thread(target=upstream.serve_forever, daemon=True).start()
+                endpoint = f"http://fixture:private-upstream@127.0.0.1:{upstream.server_port}"
+                bypass = "127.0.0.1,private-exclusion.test"
+                local_url = f"https://127.0.0.1:{server.server_port}/bypassed"
+                agent_env = dict(env, HTTPS_PROXY=endpoint, https_proxy=endpoint,
+                                 NO_PROXY=bypass, no_proxy=bypass, NODE_EXTRA_CA_CERTS=str(ca), LOCAL_URL=local_url)
+                before = len(path.read_text().splitlines())
+                result = subprocess.run([fixture, "agent", "--", "node", agent, "private prompt",
+                                         *npm[1:], "--prefix", project_agent], cwd=project, env=agent_env,
+                                        input="interactive input", capture_output=True, text=True, timeout=35)
+                assert result.returncode == 0 and "agent output" in result.stdout, (result.stdout, result.stderr)
+                assert (project_agent / "node_modules/sample/package.json").is_file()
+                child, parent = [json.loads(line) for line in path.read_text().splitlines()[before:]]
+                assert child["argv"][0] == "npm" and parent["argv"] == ["node"] and parent["scope"] == "agent_session"
+                for row, host in [(child, "allowed.test"), (parent, "new.test")]:
+                    dest, = row["destinations"]
+                    assert (dest["host"], dest["decision"], dest["reason"]) == (host, "allow", "observe"), row
+                    assert dest["sent_bytes"] > 0 and dest["attempts"] == tunnels.count(host + ":443")
+                assert "/bypassed" in requests and "/api?key=private-query" in requests
+                assert parent["coverage"]["direct_attempt_destinations"] == "not_observed"
+                assert all(secret not in path.read_text() for secret in
+                           ("private prompt", "private-query", "private-api-key", "private-upstream", "private-exclusion"))
+                upstream.shutdown()
+
+            master, slave = pty.openpty()
+            try:
+                result = subprocess.run([fixture, "agent", "--", "/bin/sh", "-c",
+                                         "test -t 0 && test -t 1 && test -t 2 && exit 17"],
+                                        cwd=project, env=env, stdin=slave, stdout=slave, stderr=slave, timeout=8)
+                assert result.returncode == 17, result.returncode
+            finally:
+                os.close(slave)
+                os.close(master)
+            with subprocess.Popen([fixture, "agent", "--", "/bin/sh", "-c",
+                                   "trap 'exit 42' TERM; echo ready; while :; do sleep 0.1; done"],
+                                  cwd=project, env=env, stdout=subprocess.PIPE, text=True) as child:
+                assert select.select([child.stdout], [], [], 8)[0], "agent did not start"
+                assert child.stdout.readline() == "ready\n"
+                child.send_signal(signal.SIGTERM)
+                assert child.wait(timeout=8) == 42
+            before = path.read_bytes()
+            run([fixture, "agent", "--", "true"], extra={"VEIL_TELL_LOG":"off"})
+            assert path.read_bytes() == before
             server.shutdown()
-    print("PASS: shell shims, TLS receiver, private local log and blocked timeline")
+    print("PASS: shell shims, TLS receiver, private local log, blocked timeline and interactive agent/child TLS observation")
 
 if __name__ == "__main__":
     trial(str(Path(sys.argv[1]).resolve()),sys.argv[2])

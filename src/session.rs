@@ -68,19 +68,8 @@ pub fn agent_env(args: &[OsString]) -> Result<u8> {
     if !matches!(shell, "bash" | "zsh" | "fish") {
         return Err(error("usage: veil-tell agent-env [--shell bash|zsh|fish]"));
     }
-    let shims = directory("shims")?;
-    let exe = std::env::current_exe()?.canonicalize()?;
+    let shims = install_shims()?;
     let dir = crate::attribution::shell_quote(&shims)?;
-    let staging = tempfile::tempdir_in(&shims)?;
-    for name in SHIMS {
-        let link = shims.join(name);
-        if fs::read_link(&link).ok().as_ref() == Some(&exe) {
-            continue;
-        }
-        let new = staging.path().join(name);
-        symlink(&exe, &new)?;
-        fs::rename(new, link)?;
-    }
     if shell == "fish" {
         let raw = shims
             .to_str()
@@ -92,6 +81,22 @@ pub fn agent_env(args: &[OsString]) -> Result<u8> {
         println!("export PATH={dir}:\"$PATH\"")
     }
     Ok(0)
+}
+
+pub(super) fn install_shims() -> Result<PathBuf> {
+    let shims = directory("shims")?;
+    let exe = std::env::current_exe()?.canonicalize()?;
+    let staging = tempfile::tempdir_in(&shims)?;
+    for name in SHIMS {
+        let link = shims.join(name);
+        if fs::read_link(&link).ok().as_ref() == Some(&exe) {
+            continue;
+        }
+        let new = staging.path().join(name);
+        symlink(&exe, &new)?;
+        fs::rename(new, link)?;
+    }
+    Ok(shims)
 }
 
 pub fn shim_name(program: &std::ffi::OsStr) -> Option<&str> {
@@ -114,12 +119,13 @@ pub fn shim(name: &str, args: &[OsString]) -> Result<u8> {
         std::env::split_paths(&path)
             .filter(|dir| dir.join(name).canonicalize().ok().as_ref() != Some(&executable)),
     )?;
-    Err(std::process::Command::new(executable)
+    let mut launch = std::process::Command::new(executable);
+    launch
         .args(["--log", "--", name])
         .args(args)
-        .env("PATH", filtered)
-        .exec()
-        .into())
+        .env("PATH", filtered);
+    crate::agent::restore_upstream(&mut launch);
+    Err(launch.exec().into())
 }
 
 fn scrub(s: &str) -> String {
@@ -154,6 +160,12 @@ fn scrub(s: &str) -> String {
 }
 
 fn argv(args: &[OsString]) -> Vec<String> {
+    // curl accepts both --header=value and short forms such as -fsSHvalue.
+    // Once an option takes a value, the rest of that argument is data.
+    let curl = args
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .is_some_and(|n| n == "curl");
     let mut mask = 0;
     args.iter()
         .map(|arg| {
@@ -167,6 +179,46 @@ fn argv(args: &[OsString]) -> Vec<String> {
                     mask = 1
                 }
                 return "***".into();
+            }
+            if curl {
+                let (option, value) = s.split_once('=').map_or((&*s, None), |(k, v)| (k, Some(v)));
+                let sensitive = matches!(
+                    option,
+                    "--header"
+                        | "--proxy-header"
+                        | "--cookie"
+                        | "--user"
+                        | "--proxy-user"
+                        | "--oauth2-bearer"
+                        | "--data"
+                        | "--data-ascii"
+                        | "--data-binary"
+                        | "--data-raw"
+                        | "--data-urlencode"
+                        | "--json"
+                        | "--form"
+                        | "--form-string"
+                        | "--url-query"
+                        | "--variable"
+                );
+                if sensitive {
+                    if value.is_some() {
+                        return "***".into();
+                    }
+                    mask = 1;
+                    return option.to_owned();
+                }
+                if let Some(flags) = s.strip_prefix('-').filter(|f| !f.starts_with('-')) {
+                    for (i, flag) in flags.char_indices() {
+                        if "HbuUdeF".contains(flag) {
+                            if i + 1 < flags.len() {
+                                return "***".into();
+                            }
+                            mask = 1;
+                            break;
+                        }
+                    }
+                }
             }
             let lower = s.to_ascii_lowercase();
             if (lower.contains("authorization")
@@ -255,7 +307,12 @@ fn private_file(path: &Path, append: bool) -> Result<File> {
     Ok(file)
 }
 
-pub fn append(cwd: &Path, args: &[OsString], report: Option<&Report>) -> Result<()> {
+pub fn append(
+    cwd: &Path,
+    args: &[OsString],
+    report: Option<&Report>,
+    agent_session: bool,
+) -> Result<()> {
     if std::env::var_os("VEIL_TELL_LOG").is_some_and(|s| s == "off") {
         return Ok(());
     }
@@ -284,7 +341,9 @@ pub fn append(cwd: &Path, args: &[OsString], report: Option<&Report>) -> Result<
     };
     let status = report.map_or(&setup, |r| &r.run_status);
     let mut record = json!({"time":time,"clock":clock,"cwd":scrub(&cwd.to_string_lossy()),"argv":argv(args),"exit_code":status.exit_code,"run_status":status,"coverage":report.map(|r|&r.coverage),"destinations":[],"attempted":[],"direct_attempts":[]});
-    if let Some(name) = agent_name() {
+    if agent_session {
+        record["scope"] = "agent_session".into();
+    } else if let Some(name) = agent_name() {
         record["agent"] = json!({"name":name,"confidence":"inferred"});
     }
     let mut length = serde_json::to_vec(&record)?.len();
@@ -316,7 +375,7 @@ pub fn append(cwd: &Path, args: &[OsString], report: Option<&Report>) -> Result<
             }
             add(
                 "destinations",
-                json!({"host":d.host,"port":d.port,"decision":d.decision,"reason":d.reason,"attempts":d.attempts,"sent_bytes":d.sent_bytes,"attribution":attribution,"new":d.reason=="new_destination"||diff.is_some_and(|c|c.added_host(&d.host,false)), "blocked":d.decision=="deny"||report.volume_anomalies.iter().any(|a|a.host==d.host&&a.blocked)}),
+                json!({"host":d.host,"port":d.port,"decision":d.decision,"reason":d.reason,"result":d.result,"attempts":d.attempts,"sent_bytes":d.sent_bytes,"attribution":attribution,"new":d.reason=="new_destination"||diff.is_some_and(|c|c.added_host(&d.host,false)), "blocked":d.decision=="deny"||report.volume_anomalies.iter().any(|a|a.host==d.host&&a.blocked)}),
             )?;
         }
         for d in report.attempted.iter().flatten() {
@@ -439,8 +498,13 @@ pub fn show(args: &[OsString]) -> Result<u8> {
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>()
                 .join(" ");
+            let prefix = if r["scope"] == "agent_session" {
+                "agent -- "
+            } else {
+                ""
+            };
             println!(
-                "{}  {}  exit {}",
+                "{}  {prefix}{}  exit {}",
                 r["clock"].as_str().unwrap_or(""),
                 command,
                 r["exit_code"]
@@ -459,7 +523,14 @@ pub fn show(args: &[OsString]) -> Result<u8> {
                     } else if key == "attempted" {
                         println!("          ✗ {host}  DNS ×{}{new}", d["attempts"]);
                     } else {
-                        let symbol = if d["blocked"] == true { "✗" } else { "✓" };
+                        let result = d["result"].as_str();
+                        let symbol = if d["blocked"] == true {
+                            "✗"
+                        } else if result.is_some_and(|r| r != "completed") {
+                            "!"
+                        } else {
+                            "✓"
+                        };
                         print!(
                             "          {symbol} {host}:{}  ×{}  {} B  {}{new}",
                             d["port"],
@@ -467,6 +538,11 @@ pub fn show(args: &[OsString]) -> Result<u8> {
                             d["sent_bytes"],
                             d["reason"].as_str().unwrap_or("")
                         );
+                        if symbol == "!"
+                            && let Some(result) = result
+                        {
+                            print!(" [{result}]");
+                        }
                         for a in d["attribution"].as_array().into_iter().flatten() {
                             if let Some(m) = a["manager"].as_str() {
                                 print!(" ← {m} (registry fetch) [inferred]");
@@ -540,4 +616,36 @@ fn process_name(pid: i32) -> Option<(i32, String)> {
         .map(|c| *c as u8)
         .collect();
     Some((info.pbi_ppid as i32, String::from_utf8(bytes).ok()?))
+}
+
+#[cfg(test)]
+mod redaction_tests {
+    use super::*;
+
+    #[test]
+    fn curl_argument_forms_do_not_persist_headers_credentials_or_bodies() {
+        let args = [
+            "/usr/bin/curl",
+            "-fsSL",
+            "--header=X-Key: abc",
+            "-fsSHX-Key: abc",
+            "-su",
+            "user:abc",
+            "--proxy-header",
+            "Cookie: abc",
+            "--cookie=abc",
+            "--data-urlencode",
+            "key=abc",
+            "--json={payload}",
+            "https://example.org/path?q=abc",
+        ]
+        .map(OsString::from);
+        let logged = argv(&args);
+        assert_eq!(logged[1], "-fsSL");
+        assert_eq!(logged.last().unwrap(), "https://example.org");
+        let rendered = logged.join(" ");
+        for value in ["abc", "X-Key", "payload", "/path"] {
+            assert!(!rendered.contains(value));
+        }
+    }
 }

@@ -1,3 +1,4 @@
+mod agent;
 mod attribution;
 mod baseline;
 mod cargo_attribution;
@@ -310,6 +311,7 @@ async fn run_command(
         .collect();
     let proxy = Arc::new(proxy::Proxy {
         mode: options.mode,
+        shared_read_idle: None,
         policy,
         ci_hosts: if options.comparison.ci {
             Some(
@@ -660,7 +662,8 @@ async fn run_command(
     {
         (exit_code, reason) = (baseline::NEW_DESTINATION, "new_destination");
     }
-    if reason == "child_failed"
+    if options.backend == Backend::Isolated
+        && status.is_some_and(|status| !status.success())
         && project_home.is_none()
         && cache.is_none()
         && let Some(tmp) = &_temporary
@@ -815,6 +818,11 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
         return isolation::linux::inside(secret, &args[2..]).await;
     }
     match args.first().and_then(|arg| arg.to_str()) {
+        Some("agent") if args.len() == 2 && isolation::is_help(&args[1]) => {
+            println!("{}", cli::USAGE);
+            return Ok(0);
+        }
+        Some("agent") => return agent::run(&args[1..], fixture).await,
         Some("agent-env") => return session::agent_env(&args[1..]),
         Some("log") => return session::show(&args[1..]),
         _ => {}
@@ -871,7 +879,12 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
     let log_args = options.log.then(|| options.command.clone());
     let result = run(options, fixture).await;
     if let Some(args) = log_args
-        && let Err(e) = session::append(&std::env::current_dir()?, &args, result.as_ref().ok())
+        && let Err(e) = session::append(
+            &std::env::current_dir()?,
+            &args,
+            result.as_ref().ok(),
+            false,
+        )
     {
         eprintln!("veil-tell: session log: {e}");
     }

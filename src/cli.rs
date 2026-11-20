@@ -12,6 +12,7 @@ Usage:
   veil-tell clean [--apply]\n\
   veil-tell accept\n\
   veil-tell version | --version (run an executable named version with veil-tell -- version)
+  veil-tell agent -- COMMAND [ARG...]
   veil-tell agent-env [--shell bash|zsh|fish]
   veil-tell log [--today | --since DURATION] [--only-new | --only-blocked] [--json]
   veil-tell [--log] [--json] [--save-baseline] [--no-attribute] COMMAND [ARG...]";

@@ -18,5 +18,7 @@ tokio = { version = "1.54", features = ["io-std", "io-util", "macros", "net", "p
 toml = "1.2"
 
 [profile.release]
-lto = "thin"
-strip = "debuginfo"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

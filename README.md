@@ -4,19 +4,38 @@
 
 ## AI エージェントと使う
 
-プロジェクトのシェルで shim を読み込み、Claude Code は `claude`、Codex は `codex`、Cursor CLI は `agent` で起動します。この PATH を継承して起動する npm、curl、git などが veil-tell を通ります。エージェントのターミナルで `command -v npm` を実行すると参照先を確認できます。絶対パス、シェルの別名、エージェント本体の API 通信は shim を通らない場合があります。[Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
+プロジェクトのシェルから、使う CLI を一つ選んで起動します。いつもの端末と認証環境を使えます。エージェントを終了したら、同じシェルで履歴を確認します。[Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
 
 ```sh
-eval "$(veil-tell agent-env --shell zsh)"
-claude
-# codex
-# agent
-veil-tell log --today --only-blocked
+veil-tell agent -- claude
+# veil-tell agent -- codex
+# veil-tell agent -- agent    # Cursor CLI
+veil-tell log --today
 ```
+
+`agent --` は隔離せず、HTTPS 環境プロキシを使うクライアントの CONNECT（443 番）を observe します。終了時のセッション行には、宛先へ送信したバイト数と接続回数が入ります。起動引数、プロンプト、認証ヘッダー、TLS の中身は保存しません。同じプロキシを継承した子プロセスの通信もこの行に含まれます。npm や curl など12個の shim は自動で PATH に入り、shim 経由のコマンドはそれぞれ別の行に記録されます。`veil-tell log --today --only-blocked` で拒否だけを確認できます。
+
+直接接続、`NO_PROXY` 対象、独自のプロキシ設定、別プロセスで既に起動中の GUI はセッションの観測範囲外になり得ます。宛先が空なら、記録した CONNECT は 0 件です。上流がある場合は `http://` の CONNECT プロキシに対応します。
+
+子コマンドに shim だけを設定するには、`eval "$(veil-tell agent-env --shell zsh)"` の後で `claude`、`codex`、`agent` のいずれかを起動します。エージェントのターミナルで `command -v npm` を実行すると参照先を確認できます。絶対パスやシェルの別名は shim を迂回する場合があります。
 
 Claude Code の Bash ツールだけに設定する場合は、`SessionStart` の command hook に `veil-tell agent-env --shell bash >> "$CLAUDE_ENV_FILE"` を指定できます。[Claude Code の環境変数フック](https://code.claude.com/docs/en/hooks#persist-environment-variables)
 
-以下は両 OS のシェルで shim を使った実測です。Puppeteer 25.17.0 に対し、レジストリだけをレビューした基準で `CI=true` を指定しました。✓ は CONNECT の許可を示します。バイト数は TLS トンネルで実際に転送した量です。拒否行の 0 B は転送量で、子が送ろうとした総量は分かりません。
+### Codex 本体の通信（macOS 実測）
+
+Codex CLI 0.155.1 がローカルの模擬 API に 1 ターン送信し、応答を受け取ったときの記録です。模擬 API は `POST /v1/responses` を 1 回受信しました。ほかの 3 ホストへの CONNECT はローカル上流で拒否され、各宛先への転送は 0 バイトでした。実アカウントや有償 API は使っていません。
+
+```text
+00:29:00  agent -- codex  exit 0
+          ✓ allowed.test:443  ×1  39465 B  observe
+          ! api.github.com:443  ×1  0 B  observe [connect_failed]
+          ! chatgpt.com:443  ×2  0 B  observe [connect_failed]
+          ! github.com:443  ×1  0 B  observe [connect_failed]
+```
+
+### npm install の通信（macOS・Linux 実測）
+
+以下は両 OS のシェルで shim を使った実測です。Puppeteer 25.17.0 に対し、レジストリだけをレビューした基準で `CI=true` を指定しました。✓ は CONNECT の許可を示します。バイト数は TLS トンネルを通じて宛先へ送信した量です。拒否行の 0 B は転送量で、子が送ろうとした総量は分かりません。
 
 macOS 27.2.1 arm64
 
@@ -44,7 +63,8 @@ veil-tell 自体はテレメトリーを送りません。履歴はローカル�
 - DNS の解決先がすべて 198.18.0.0/15 なら fake-IP の可能性があります。信頼する TUN 環境だけで `VEIL_TELL_ALLOW_FAKE_IP=1` を指定してください。混在・ローカル宛先は引き続き拒否します。
 - `HTTPS_PROXY` または `https_proxy` が HTTP プロキシなら、許可した CONNECT をそこへ中継します。この経路の名前解決・接続先アドレス検査は上流側が担います。`NO_PROXY` はホスト名・ドメイン接尾辞・任意の `:443`・`*` に対応します。
 - macOS の隔離中に `curl: (60) ... unable to get local issuer certificate` が出たら、その宛先の証明書チェーンを検証できる、信頼済みの CA バンドルを `curl --cacert /path/to/ca-bundle.pem` で指定してください。CONNECT が許可された後でも、TLS の証明書検証は失敗することがあります。
-- `VEIL_TELL_CACHE=persistent` で、隔離内に専用の `~/.cache/veil-tell/<manager>` を用意します。キャッシュ命中で消えた宛先は情報扱いです。pnpm は従来のプロジェクトストア設定も使います。一時ホームのマネージャーログがあれば、診断に使う既知のエラーコードを `.veil-tell/logs/` に保存します。このディレクトリは Git 管理外にしてください。
+- `VEIL_TELL_CACHE=persistent` で、隔離内に専用の `~/.cache/veil-tell/<manager>` を用意します。キャッシュ命中で消えた宛先は情報扱いです。pnpm は従来のプロジェクトストア設定も使います。
+- 一時ホームで npm・pnpm・Yarn が失敗したときは、そこにある既知のログを合計 1 MiB まで調べます。マネージャー名、検出した既知のエラーコードと説明、npm の既知のシステムコール名だけを `.veil-tell/logs/<日時>-<識別子>/manager.log` に保存し、パスを表示します。たとえば `ENOENT` と `syscall: open` で、ファイルを開く際のエラーを確認できます。パスや引数を含むログ本文はコピーしません。プロジェクトの `.gitignore` に `/.veil-tell/logs/` と `/.veil-tell/pending.json` を追加してください。
 
 ## 使い方
 
