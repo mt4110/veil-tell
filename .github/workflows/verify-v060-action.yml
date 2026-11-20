@@ -31,7 +31,7 @@ jobs:
           printf 'update-notifier=false\n' > .npmrc
       - name: Run the published Action
         id: veil
-        uses: mt4110/veil-tell@v0.6.0
+        uses: mt4110/veil-tell@v0
         with:
           command: npm run smoke
       - name: Verify the version and isolated result
