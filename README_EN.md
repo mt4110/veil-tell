@@ -2,6 +2,70 @@
 
 [日本語](README.md)
 
+## Use with an AI agent
+
+Launch one CLI from the project shell. It keeps its terminal and authentication environment. After exiting the agent, read the history in the same shell. [Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
+
+```sh
+veil-tell agent -- claude
+# veil-tell agent -- codex
+# veil-tell agent -- agent    # Cursor CLI
+veil-tell log --today
+```
+
+`agent --` runs without isolation and observes CONNECT requests to port 443 from clients that use the HTTPS environment proxy. At exit, the session row lists bytes sent to each destination and connection counts. It omits launch arguments, prompts, authorization headers and TLS contents. Descendants using the same proxy contribute to this row. The launcher also puts the 12 shims on PATH. Commands such as npm and curl that run through a shim get their own rows. Use `veil-tell log --today --only-blocked` to see denials.
+
+Direct connections, `NO_PROXY` exclusions, custom proxy settings and already-running GUI processes can fall outside session coverage. An empty row means the session proxy recorded zero CONNECT requests. If your environment requires an upstream proxy, the launcher supports an `http://` CONNECT proxy.
+
+To install only the child-command shims, run `eval "$(veil-tell agent-env --shell zsh)"`, then start `claude`, `codex` or `agent`. Check `command -v npm` in the agent's terminal to see the selected executable. Absolute executable paths and shell aliases can bypass PATH shims.
+
+For the Bash tool in Claude Code, a `SessionStart` command hook can run `veil-tell agent-env --shell bash >> "$CLAUDE_ENV_FILE"`. [Claude Code environment hooks](https://code.claude.com/docs/en/hooks#persist-environment-variables)
+
+### Codex API traffic on macOS
+
+Codex CLI 0.155.1 sent one turn to a local mock API and received a reply. The mock received one POST to `/v1/responses`. The local upstream refused CONNECT requests to the other three hosts. Zero bytes were forwarded to those destinations. This trial used no provider account or paid API.
+
+```text
+00:29:00  agent -- codex  exit 0
+          ✓ allowed.test:443  ×1  39465 B  observe
+          ! api.github.com:443  ×1  0 B  observe [connect_failed]
+          ! chatgpt.com:443  ×2  0 B  observe [connect_failed]
+          ! github.com:443  ×1  0 B  observe [connect_failed]
+```
+
+### npm install traffic on macOS and Linux
+
+These are actual shim runs of Puppeteer 25.17.0 with `CI=true` and a reviewed registry-only baseline. The command ran in a shell on each OS. ✓ identifies an allowed CONNECT. Bytes count data sent to the destination through the TLS tunnel. A denied CONNECT has zero forwarded bytes, while the amount the child intended to send is unknown.
+
+macOS 27.2.1 arm64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55682 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+Debian 13 aarch64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55570 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+Use `--shell bash|zsh|fish` (fish: `veil-tell agent-env --shell fish | source`), or run one command with `veil-tell --log COMMAND`. Shims observe by default and use the existing rules for dependency commands with a project baseline. Use `veil-tell log --since 2h --only-new --json` for filtered JSON Lines, or `veil-tell version` for the installed version.
+
+veil-tell sends no telemetry. Session history stays under `$XDG_STATE_HOME/veil-tell/log` (default: `~/.local/state` on Linux, `~/Library/Application Support` on macOS as the state root). Logging masks URL paths, query strings and recognized credential arguments. Arbitrary positional arguments may still be sensitive. Set `VEIL_TELL_LOG=off` to disable history. Retention is 30 days, up to 10 MiB per day.
+
+### Proxy and cache troubleshooting
+
+- Node.js uses the environment proxy for both `fetch` and `https.get` on the 22.x line from 22.21 and the 24.x line from 24.5. A custom client agent can choose another route. [Node.js proxy support](https://nodejs.org/learn/http/enterprise-network-configuration)
+- An all-198.18.0.0/15 DNS answer may indicate a fake-IP resolver. In a trusted TUN environment set `VEIL_TELL_ALLOW_FAKE_IP=1`. Mixed and local answers remain denied.
+- An HTTP proxy in `HTTPS_PROXY` or `https_proxy` receives allowed CONNECTs. For those tunnels the upstream controls DNS and destination address checks. Established tunnels count toward volume baselines and CI limits even when the destination IP is unknown. `NO_PROXY` supports host/domain suffixes, optional `:443` and `*`.
+- If isolated curl on macOS reports `curl: (60) ... unable to get local issuer certificate`, pass a trusted CA bundle that verifies the destination’s certificate chain with `curl --cacert /path/to/ca-bundle.pem`. TLS certificate validation can fail after an allowed CONNECT.
+- `VEIL_TELL_CACHE=persistent` enables a separate cache under `~/.cache/veil-tell/<manager>` in isolation. A destination absent after a cache hit is informational. Keep the pnpm project's existing store setting.
+- When npm, pnpm or Yarn fails with a temporary home, veil-tell scans up to 1 MiB in total from known logs in that home. It prints the path to `.veil-tell/logs/<timestamp>-<id>/manager.log`, which contains the manager name, recognized error codes with descriptions, and recognized npm syscall names. For example, `ENOENT` and `syscall: open` identify a failed attempt to open a file. Raw log lines, including paths and arguments, are omitted. Add `/.veil-tell/logs/` and `/.veil-tell/pending.json` to the project’s `.gitignore`.
+
 ## Quick start
 
 ```sh
@@ -106,14 +170,14 @@ Run `veil-tell observe --emit-policy FILE -- COMMAND` to generate a TOML draft. 
 
 - **Capture includes HTTP CONNECT requests that reach the local proxy.** The proxy backend permits direct connections, which are outside its capture scope.
 - **Isolation also records supported Node.js lookup attempts.** The report identifies this as `coverage.dns_attempts: node_dns_lookup_hook`. Native system resolvers and direct IP attempts are outside this coverage. [Details](docs/dns-attempts.md)
-- **The isolated backend restricts direct connections at the OS level.** Both modes report `coverage.proxy = "http_connect_requests"` and `coverage.direct_attempt_destinations = "not_observed"` in JSON v1. The report omits details of OS-denied direct connections and IPC.
+- **The isolated backend restricts direct connections at the OS level.** Linux reports `coverage.direct_attempt_destinations = "ip_port"` when seccomp notifications are available, `not_observed` when unavailable, and `incomplete` on capture overflow.
 - **Data can still leave through an allowed host.** CI and explicitly configured limits can close a tunnel when outbound volume exceeds its budget. Bytes within the limit can still reach the receiver. [Volume limits and scope](docs/volume-limits.md) For example, a child process may be able to send secrets to an allowed GitHub host or npm registry using credentials it can access or public upload features. The proxy tunnels TLS. HTTP methods, URL paths, and request bodies are outside its capture and control scope. An allow rule permits a tunnel to the host.
 
 | Capture under isolation | Linux | macOS |
 | --- | --- | --- |
 | HTTP CONNECT reaching the proxy | Hostname and port | Hostname and port |
 | Supported Node.js lookups | Recorded by hostname and denied | Recorded by hostname and denied |
-| System resolvers used by curl, Python, Go and Rust, or literal IPs | Direct destinations and counts are unobserved | Direct destinations and counts are unobserved |
+| System resolvers used by curl, Python, Go and Rust, or literal IPs | IP, port and count with notification support. DNS question names are unavailable | Direct destinations and counts are unobserved |
 
 `CI=true veil-tell npm install` requires isolation and an existing baseline, and returns `21` for new CONNECT destinations or newly observed lookup attempts. Local shorthand does not fail solely on recorded lookup attempts. Explicit `observe --baseline FILE` reports an outbound volume anomaly with exit `21`; an enforced tunnel cutoff still uses `22`. Small transfers below the threshold and totals spanning several runs are outside volume comparison.
 
@@ -129,7 +193,7 @@ veil-tell overlaps with host-level controls in LuLu, Little Snitch, and OpenSnit
 
 - **Linux** requires non-setuid bubblewrap and unprivileged user namespaces. The default path is `/usr/bin/bwrap`. Set `VEIL_TELL_BWRAP` to a trusted absolute path to use a different installation. The working directory is writable. Standard runtime directories and the Nix store are read-only.
 - **macOS** uses the deprecated `/usr/bin/sandbox-exec`. It limits outbound IPv4/TCP to the run's localhost proxy port and denies named Mach service lookup and registration. Receiver tests on macOS 27.2 arm64 covered `CFMessagePort` and an app-bundled XPC service relaying to TCP. On the same OS, tested unicast DNS queries including A and AAAA via `getaddrinfo()` and TXT and KEY via `DNSServiceQueryRecord()` did not reach the authoritative server under isolation.
-- Isolated runs use a temporary home, a reduced environment, and closed standard input. Keep policy and report files outside the working directory. Choose a new report path for each run.
+- Isolated runs use a temporary home and a reduced environment. Standard input is normally closed. Shims installed by `agent-env` or `agent --` pass input through, so commands such as `curl --config -` can read a pipeline. On isolated Linux runs, a regular file redirected read-only needs a live pathname. The command reads on demand from a read-only mount. Its final file position is applied to the shell input at exit. Use the input from one command at a time. Terminal input is passed as a byte stream. Keep policy and report files outside the working directory. Choose a new report path for each run.
 
 ## Try isolation and exit code `20` on Ubuntu
 

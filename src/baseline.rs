@@ -75,7 +75,7 @@ impl Baseline {
         let mut volume = BTreeMap::<String, crate::volume::Sample>::new();
         let mut counts = BTreeMap::<_, Endpoint>::new();
         for event in events {
-            if event.connected_ip.is_some() {
+            if event.tunnel_established {
                 volume.entry(event.host.clone()).or_default().record(event);
             }
             let endpoint = counts
@@ -88,7 +88,14 @@ impl Baseline {
                 });
             endpoint.attempts = endpoint.attempts.saturating_add(event.attempts);
             for source in &event.attribution {
-                crate::attribution::record(&mut endpoint.attribution, source.clone());
+                crate::attribution::record(
+                    &mut endpoint.attribution,
+                    if source.manager.is_some() {
+                        crate::attribution::Attribution::unknown()
+                    } else {
+                        source.clone()
+                    },
+                );
             }
         }
         Self {
@@ -292,6 +299,26 @@ impl Comparison {
 
     pub fn created(&self) -> bool {
         self.status == "created"
+    }
+
+    pub fn lock_evidence(
+        &self,
+        host: &str,
+        port: u16,
+        source: &crate::attribution::Attribution,
+    ) -> Option<&str> {
+        self.lockfile_evidence
+            .iter()
+            .find(|e| e.host == host && e.port == Some(port) && &e.source == source)
+            .map(|e| e.evidence.label.as_str())
+    }
+
+    pub fn added_host(&self, host: &str, dns: bool) -> bool {
+        if dns {
+            self.attempted_added.iter().any(|d| d.host == host)
+        } else {
+            self.added.iter().any(|d| d.host == host)
+        }
     }
 
     pub fn has_new(&self) -> bool {
@@ -833,7 +860,10 @@ mod tests {
             decision: "allow",
             reason: "observe",
             result: "completed",
-            connected_ip: None,
+            resolver_hint: None,
+            via_upstream_proxy: false,
+            connected_ip: Some("192.0.2.1".parse().unwrap()),
+            tunnel_established: true,
             attempts,
             sent_bytes: 0,
             max_connection_bytes: 0,

@@ -185,7 +185,7 @@ def destination_diff_test(cli, fixture, project, evidence, node_root=None):
         ], 0)
         assert result.returncode == 21 and "CONNECT=403" in result.stdout, result.stderr
         data = json.loads(changed.read_text())
-        assert data["coverage"]["direct_attempt_destinations"] == "not_observed"
+        assert data["coverage"]["direct_attempt_destinations"] == ("ip_port" if sys.platform == "linux" else "not_observed")
         assert data["run_status"] == {"exit_code": 21, "reason": "new_destination"}
         event, = data["destinations"]
         assert (event["reason"], event["result"], event["sent_bytes"], event["received_bytes"]) == (
@@ -239,11 +239,21 @@ def action_summary(report):
     return subprocess.check_output([sys.executable, renderer, report], text=True)
 
 
-def volume_test(fixture, project, evidence, node_root):
+def upstream_connect(stream):
+    request = stream.readline()
+    for line in stream:
+        if line == b"\r\n":
+            return request
+    raise AssertionError("incomplete upstream CONNECT request")
+
+
+def volume_test(cli, fixture, project, evidence, node_root):
     policy = evidence / "volume.toml"
     policy.write_text('version = 1\nprofile = "volume"\n[[rule]]\n'
                       'action = "allow"\nhost = "allowed.test"\nport = 443\nmax_sent_bytes = 8192\n')
     baseline = evidence / "volume-baseline.json"
+    upstream_baseline = evidence / "upstream-volume-baseline.json"
+    refused_baseline = evidence / "upstream-refused-baseline.json"
     with socket.socket() as receiver:
         receiver.bind((os.environ.get("VEIL_TELL_TEST_IP", "127.0.0.1"), 0))
         receiver.listen()
@@ -256,6 +266,10 @@ def volume_test(fixture, project, evidence, node_root):
             ("no-baseline", ["observe"], 524288, 524288, 0),
             ("restrict", ["restrict", "--policy", policy], 524288, 8192, 22),
             ("ci", ["ci", "--baseline", baseline], 524288, 131072, 22),
+            ("upstream-train", ["observe", "--baseline-out", upstream_baseline], 4096, 4096, 0),
+            ("upstream-observe", ["observe", "--baseline", upstream_baseline], 524288, 524288, 21),
+            ("upstream-ci", ["ci", "--baseline", upstream_baseline], 524288, 131072, 22),
+            ("upstream-refused", ["observe", "--baseline-out", refused_baseline], 0, 0, 0),
         ]
         if node_root:
             demo = project / "volume-demo"
@@ -275,12 +289,22 @@ def volume_test(fixture, project, evidence, node_root):
             ])
 
         for name, arguments, sent, expected, code in cases:
+            via_upstream = name.startswith("upstream-")
+            refused = name == "upstream-refused"
             received = []
 
             def collect():
                 conn, _ = receiver.accept()
                 with conn, conn.makefile("rb") as data:
                     conn.settimeout(4)
+                    if via_upstream:
+                        host = "new.test" if refused else "allowed.test"
+                        assert upstream_connect(data) == f"CONNECT {host}:443 HTTP/1.1\r\n".encode()
+                        if refused:
+                            conn.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                            received.append(len(data.read()))
+                            return
+                        conn.sendall(b"HTTP/1.1 200 Established\r\n\r\n")
                     received.append(len(data.read()))
                     try:
                         conn.sendall(b"ACK")
@@ -298,23 +322,40 @@ def volume_test(fixture, project, evidence, node_root):
                         "scripts": {"postinstall": f"{sys.executable} -B probe.py volume {sent}"},
                     }))
                     command = ["npm", "install", "--no-audit", "--no-fund", "--no-update-notifier"]
+                elif refused:
+                    command = [sys.executable, "-B", "probe.py", "new-destination"]
                 else:
                     command = [sys.executable, "-B", "probe.py", "volume", str(sent)]
                 child = subprocess.run(
-                    [fixture, *arguments, *([] if arguments[0] == "ci" else ["--backend", "isolated"]),
+                    [cli if via_upstream else fixture, *arguments,
+                     *([] if arguments[0] == "ci" else ["--backend", "isolated"]),
                      "--report", report, "--", *command],
                     cwd=demo if install else project,
-                    env=env, capture_output=True, text=True, timeout=12,
+                    env=dict(env, HTTPS_PROXY=f"http://{address}", NO_PROXY="") if via_upstream else env,
+                    capture_output=True, text=True, timeout=12,
                 )
             finally:
                 thread.join()
             assert child.returncode == code and received == [expected], (child.stderr, received)
             result = json.loads(report.read_text())
             assert result["child_status"]["exit_code"] == 0, (child.stdout, child.stderr, result)
-            assert result["destinations"][0]["sent_bytes"] == expected
+            destination, = result["destinations"]
+            assert destination["sent_bytes"] == expected, destination
+            if via_upstream:
+                assert destination["via_upstream_proxy"] and destination["connected_ip"] is None, destination
+            if name == "upstream-train":
+                assert json.loads(upstream_baseline.read_text())["volume"]["allowed.test"] == {
+                    "sent_bytes": expected, "max_connection_bytes": expected, "connections": 1,
+                }
+            if refused:
+                assert destination["result"] == "connect_failed", destination
+                assert not json.loads(refused_baseline.read_text()).get("volume")
             if code:
                 anomaly, = result["volume_anomalies"]
                 assert anomaly["blocked"] == (code == 22), result
+                assert anomaly["observed"] == {
+                    "sent_bytes": expected, "max_connection_bytes": expected, "connections": 1,
+                }, anomaly
                 assert result["run_status"]["reason"] == (
                     "volume_limit_exceeded" if code == 22 else "volume_anomaly"
                 ), result
@@ -340,8 +381,8 @@ def dns_attempt_test(cli, project, evidence, runtime):
         "scripts": {"postinstall": "node probe.cjs"},
     }))
     (demo / "probe.cjs").write_text(
-        'fetch("https://postinstall.invalid").then(() => process.exit(2), '
-        'error => { if (error.cause?.code !== "ENOTFOUND") process.exit(3) });'
+        'require("node:dns").promises.lookup("postinstall.invalid").then(() => process.exit(2), '
+        'error => { if (error.code !== "ENOTFOUND") process.exit(3) });'
     )
     if sys.platform == "linux":
         shutil.copytree(runtime, demo / "runtime", symlinks=True)
@@ -645,6 +686,90 @@ def baseline_upgrade_test(cli, project, runtime):
     print(f"fixture os={sys.platform} known_destination_missing=5 approvals=0 migration=ok")
 
 
+def linux_shorthand_startup(cli, project):
+    if sys.platform != "linux":
+        return
+    env = os.environ.copy()
+    env.pop("VEIL_TELL_BWRAP", None)
+    env.pop("CI", None)
+
+    # A running child owns its exit status, including 125. Cross the startup
+    # deadline to check that it applies only before exec and cannot replay it.
+    result = subprocess.run(
+        [cli, "--json", "/bin/sh", "-c", "echo started >> starts; sleep 6; exit 125"],
+        cwd=project, env=env, capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 125 and (project / "starts").read_text() == "started\n"
+    assert json.loads(result.stdout)["backend"] == "isolated"
+    assert "observing via proxy" not in result.stderr
+
+    # A system root is not an isolatable project. Interactive shorthand can
+    # fall back after the independent probe fails. CI must stop before exec.
+    for strict in (False, True):
+        result = subprocess.run(
+            [cli, "--json", "/bin/echo", "payload-ran"], cwd="/",
+            env=dict(env, CI="1" if strict else "0"), capture_output=True, text=True,
+        )
+        if strict:
+            assert result.returncode == 125 and "payload-ran" not in result.stderr
+            assert "CI requires isolation" in result.stderr and not result.stdout
+        else:
+            assert result.returncode == 0 and json.loads(result.stdout)["backend"] == "proxy"
+            assert result.stderr.splitlines().count("payload-ran") == 1
+    print("receiver case=linux-shorthand-startup once=1 child_exit=125 fallback=proxy ci=125")
+
+
+def output_and_upstream_test(cli, project):
+    def invoke(args, env=None):
+        return subprocess.run([cli, *args], cwd=project, env=env, capture_output=True, text=True, timeout=12)
+    missing = invoke(["veil-tell-command-does-not-exist"])
+    assert missing.returncode and missing.stderr.count("Next / 次:") == 1, missing.stderr
+    denied = invoke(["curl", "-fsS", "https://example.local"])
+    assert denied.returncode and "Next / 次: veil-tell denied example.local:443 (non_public_destination)" in denied.stderr
+    env = dict(os.environ, NO_PROXY="", no_proxy="")
+    with socket.socket() as receiver:
+        receiver.bind(("127.0.0.1", 0))
+        receiver.listen()
+        receiver.settimeout(6)
+        env["HTTPS_PROXY"] = f"http://trial:fixture-secret@127.0.0.1:{receiver.getsockname()[1]}"
+        requests = []
+        def upstream():
+            for _ in range(2):
+                conn, _ = receiver.accept()
+                with conn, conn.makefile("rb") as stream:
+                    request = []
+                    for line in stream:
+                        if line == b"\r\n": break
+                        request.append(line)
+                    requests.append(request)
+                    conn.sendall(b"HTTP/1.1 200 Established\r\n\r\n")
+                    stream.read()
+                    conn.sendall(b"ACK")
+        thread = threading.Thread(target=upstream)
+        thread.start()
+        try:
+            result=invoke(["observe","--json","--",sys.executable,"-B","probe.py","observe-candidates"],env)
+        finally:
+            thread.join()
+    assert result.returncode==0, result.stderr
+    assert len(requests)==2 and all(r[0]==b"CONNECT allowed.test:443 HTTP/1.1\r\n" for r in requests)
+    encoded = base64.b64encode(b"trial:fixture-secret")
+    assert all(b"Proxy-Authorization: Basic "+encoded+b"\r\n" in r for r in requests)
+    assert all(secret not in result.stdout+result.stderr for secret in ("fixture-secret",encoded.decode()))
+    assert json.loads(result.stdout)["destinations"][0]["via_upstream_proxy"]
+    assert [s for s in result.stderr.splitlines() if s.startswith("veil-tell: allowed.test:")] == [
+        "veil-tell: allowed.test:443 allow observe ×2"]
+    if sys.platform != "linux":
+        print("SKIP direct_attempts: Linux seccomp notification test")
+        return
+    for cmd in ([sys.executable,"-c","import socket;socket.create_connection(('192.0.2.1',443),1)"],
+                ["curl","--noproxy","*","--max-time","2","https://example.invalid"]):
+        trial=invoke(["observe","--backend","isolated","--json","--",*cmd])
+        data=json.loads(trial.stdout)
+        assert data["coverage"]["direct_attempt_destinations"]=="ip_port" and trial.returncode
+        assert any(r["attempts"]>=1 and r["port"]==(443 if cmd[0]==sys.executable else 53) for r in data["direct_attempts"])
+
+
 def run(cli, fixture, node_root=None):
     cli, fixture = Path(cli).resolve(), Path(fixture).resolve()
     ip = os.environ.get("VEIL_TELL_TEST_IP", "127.0.0.1")
@@ -655,6 +780,8 @@ def run(cli, fixture, node_root=None):
         evidence = root / "evidence"
         evidence.mkdir()
         shutil.copyfile(SCRIPT, project / "probe.py")
+        linux_shorthand_startup(cli, project)
+        output_and_upstream_test(cli, project)
         policies = {}
         for action in ("unknown", "allow", "deny"):
             path = evidence / f"{action}.toml"
@@ -708,7 +835,7 @@ def run(cli, fixture, node_root=None):
                 assert report["schema_version"] == 1 and report["backend"] == backend
                 assert report["child_status"]["exit_code"] == 0
                 assert report["run_status"]["exit_code"] == exit_code
-                assert report["coverage"]["direct_attempt_destinations"] == "not_observed"
+                assert report["coverage"]["direct_attempt_destinations"] == ("ip_port" if backend == "isolated" and sys.platform == "linux" else "not_observed")
                 assert report["coverage"]["proxy"] == "http_connect_requests"
                 assert len(report["destinations"]) == 1 and report["destinations"][0]["reason"] == expected
                 print(f"receiver case={name} connections={len(collected)} tokens={collected} exit={exit_code}")
@@ -727,7 +854,7 @@ def run(cli, fixture, node_root=None):
             assert child.returncode == 0 and "EBADF" in child.stdout, (child.stdout, child.stderr)
             assert receive(receiver, 1) == [b""]
             print("receiver case=inherited-fd connections=1 payload_bytes=0 errno=EBADF")
-        volume_test(fixture, project, evidence, node_root)
+        volume_test(cli, fixture, project, evidence, node_root)
         destination_diff_test(cli, fixture, project, evidence, node_root)
         if node_root:
             npm_test(fixture, Path(node_root).resolve(), project, evidence, policies["allow"], ip)
@@ -796,6 +923,17 @@ def npm_test(fixture, runtime, project, evidence, policy, ip):
                 fixture, "restrict", "--backend", "isolated", "--policy", policy, "--fail-on-unknown",
                 "--report", evidence / "npm.json", "--", *command,
             ], cwd=project, env=env, capture_output=True, text=True, timeout=25)
+            for backend in ("proxy", "isolated"):
+                for probe in ("fetch('https://allowed.test/veil-cli-fixture').then(r=>r.json()).then(r=>console.log(r.name))",
+                              "require('node:https').get('https://allowed.test/veil-cli-fixture',{ca:require('fs').readFileSync('registry.crt')},r=>r.pipe(process.stdout))"):
+                    # Supply the fixture CA in the child even when the isolated environment is cleared.
+                    child = subprocess.run([fixture, "observe", "--backend", backend, "--json", "--",
+                                            runtime / "bin/node", "--use-openssl-ca", "-e",
+                                            "const tls=require('node:tls');tls.setDefaultCACertificates([require('fs').readFileSync('registry.crt','utf8')]);"+probe],
+                                           cwd=project, env=env, text=True, capture_output=True, timeout=10)
+                    assert child.returncode == 0 and "veil-cli-fixture" in child.stderr, child.stderr
+                    row, = json.loads(child.stdout)["destinations"]
+                    assert (row["host"],row["attempts"],row["result"]) == ("allowed.test",1,"completed"), row
             training_command = ["--cache=.npm-training-cache" if arg.startswith("--cache=") else arg
                                 for arg in command]
             training_command[1] = "ci"

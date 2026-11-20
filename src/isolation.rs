@@ -1,6 +1,7 @@
 use crate::{Result, cli::Backend, error, proxy::Listener};
 use std::ffi::{OsStr, OsString};
 use std::io;
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
@@ -16,11 +17,19 @@ pub struct Launch {
     pub command: Command,
     // Retain the private home or Unix socket directory until the session ends.
     pub temporary: Option<tempfile::TempDir>,
+    #[cfg(target_os = "linux")]
+    pub file_stdin: Option<linux::stdin::FileInput>,
+    #[cfg(target_os = "linux")]
+    pub capture: Option<std::os::unix::net::UnixDatagram>,
     pub npm_wrapper: Option<tempfile::TempDir>,
 }
 
 #[derive(Default)]
 pub struct LaunchConfig<'a> {
+    pub stdin: Option<&'a OwnedFd>,
+    #[cfg(target_os = "linux")]
+    pub confirm_exec: bool,
+    pub cache: Option<&'a Path>,
     pub npm: bool,
     pub cargo: bool,
     pub node_manager: Option<&'a str>,
@@ -52,7 +61,9 @@ pub async fn prepare(
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
-    let wrapper = (attribute_npm
+    let node_command = crate::manager::executable(command) == Some("node");
+    let wrapper = (node_command
+        || attribute_npm
         || attribute_cargo
         || node_manager.is_some()
         || backend == Backend::Isolated)
@@ -78,7 +89,7 @@ pub async fn prepare(
     }
     let node_hook = wrapper
         .as_ref()
-        .filter(|_| node_attribution || backend == Backend::Isolated)
+        .filter(|_| node_command || node_attribution || backend == Backend::Isolated)
         .map(|dir| dir.path().join("node-dns.cjs"));
     if let Some(hook) = &node_hook {
         std::fs::write(hook, NODE_DNS_HOOK)?;
@@ -137,6 +148,11 @@ pub async fn prepare(
     };
     launch.current_dir(cwd);
     set_proxy(&mut launch, port, secret);
+    if let Some(cache) = config.cache
+        && let Some(manager) = crate::manager::executable(command)
+    {
+        crate::manager_files::configure(&mut launch, manager, cache);
+    }
     if let Some(hook) = &node_hook {
         configure_node_dns(
             &mut launch,
@@ -156,13 +172,22 @@ pub async fn prepare(
         crate::cargo_attribution::configure(&mut launch, rustc, cwd);
     }
     supervise_stdio(&mut launch);
+    if let Some(input) = config.stdin {
+        launch.stdin(input.try_clone()?);
+    }
     Ok(Launch {
         listener: Listener::Tcp(listener),
         command: launch,
         temporary,
+        #[cfg(target_os = "linux")]
+        capture: None,
+        #[cfg(target_os = "linux")]
+        file_stdin: None,
         npm_wrapper: wrapper,
     })
 }
+
+pub const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub async fn probe(cwd: &Path) -> Result<()> {
     let mut launch = prepare(
@@ -175,8 +200,7 @@ pub async fn probe(cwd: &Path) -> Result<()> {
         LaunchConfig::default(),
     )
     .await?;
-    let output =
-        tokio::time::timeout(std::time::Duration::from_secs(5), launch.command.output()).await??;
+    let output = tokio::time::timeout(PROBE_TIMEOUT, launch.command.output()).await??;
     if output.status.success() {
         return Ok(());
     }
@@ -292,6 +316,12 @@ pub fn configure_manager(
             .env_remove("VEIL_TELL_NODE_ROOT")
             .env_remove("VEIL_TELL_NODE_MANAGER");
     }
+    if manager == "npm" && attribute {
+        let url = format!("http://veil:{secret}~manager-npm@127.0.0.1:{port}");
+        for key in PROXY_VARS {
+            command.env(key, &url);
+        }
+    }
     if manager == "pnpm" {
         command.env("npm_config_update_notifier", "false");
     }
@@ -329,7 +359,9 @@ pub fn set_proxy(command: &mut Command, port: u16, secret: &str) {
     ] {
         command.env_remove(key);
     }
-    command.env("npm_config_noproxy", "");
+    command
+        .env("npm_config_noproxy", "")
+        .env("NODE_USE_ENV_PROXY", "1");
 }
 
 pub fn supervise_stdio(command: &mut Command) {

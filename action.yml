@@ -32,10 +32,11 @@ runs:
         set -euo pipefail
         case "$(uname -s)/$(uname -m)" in
           Darwin/arm64) platform=macos-arm64 ;;
+          Linux/aarch64) platform=linux-aarch64-gnu ;;
           Linux/x86_64) platform=linux-x86_64-gnu ;;
           *) echo 'No release binary for this runner.' >&2; exit 125 ;;
         esac
-        version=0.5.2
+        version=0.6.0
         archive="veil-tell-$version-$platform.tar.gz"
         install_dir="$RUNNER_TEMP/veil-tell"
         mkdir -p "$install_dir/bin"

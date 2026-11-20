@@ -1,5 +1,11 @@
 // The isolated backend reports covered lookups to the existing relay and
 // returns ENOTFOUND. The relay never resolves these names.
+const [major, minor] = process.versions.node.split('.').map(Number);
+if (!(major > 24 || major === 24 && minor >= 5 || major === 22 && minor >= 21)
+    && !process.env.VEIL_TELL_NODE_PROXY_WARNED) {
+  console.error('veil-tell: built-in fetch and https proxy coverage requires Node 22.21.x+, 24.5.x+ or later supported lines');
+  process.env.VEIL_TELL_NODE_PROXY_WARNED = '1';
+}
 const dns = require('node:dns');
 const net = require('node:net');
 

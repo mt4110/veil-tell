@@ -453,6 +453,10 @@ fn parse_address(value: &str) -> io::Result<SocketAddr> {
 fn main() {
     let args = env::args().skip(1).collect::<Vec<_>>();
     let result = match args.as_slice() {
+        #[cfg(target_os = "linux")]
+        [mode] if mode == "notify" => Command::new("python3").arg("-c")
+            .arg(include_str!("notify_probe.py")).status().map(|s| s.code().unwrap_or(1)),
+
         #[cfg(target_os = "macos")]
         [mode] if mode == "macos" => seatbelt::run().map(|()| 0),
         #[cfg(target_os = "macos")]

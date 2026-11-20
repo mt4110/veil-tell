@@ -16,3 +16,20 @@ On macOS 27.2, the host receiver recorded one control packet and zero isolated
 packets. A host-loopback DNS service would require another Seatbelt exception.
 The system resolver uses mDNSResponder. Opening its IPC would change the existing
 isolation boundary, so the experiment keeps it denied.
+
+2026-11-20: Linux aarch64, Debian kernel 6.12.95+deb13-cloud-arm64, uid 501.
+Inside non-setuid bubblewrap with separate PID, user and network namespaces,
+the notify probe installed NEW_LISTENER and an ancestor read 16 sockaddr bytes
+for 192.0.2.1:443. The child received ENETUNREACH. The probe reads socket
+addresses only. DNS question decoding (stage B) was not evaluated by this probe.
+
+Stage A in the CLI recorded Python's direct TCP attempt and two 127.0.0.1:53
+attempts from curl using the system resolver. A DNS socket connect carries no
+question name. Returning ENETUNREACH at that point prevents later transmission
+of the question. Stage B would need another observation point for that path.
+
+The Debian VM used ptrace_scope=0. On Ubuntu 26.04.1 x86_64, kernel
+7.0.0-43-generic and ptrace_scope=1, the unprivileged release executable
+recorded one denied 192.0.2.1:443 attempt and two 127.0.0.1:53 attempts
+after the startup change. If ancestor reads are denied by kernel policy,
+the CLI leaves direct coverage unobserved and retains network isolation.

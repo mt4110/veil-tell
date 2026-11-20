@@ -110,7 +110,7 @@ struct Trials {
 #[derive(Serialize)]
 #[serde(untagged)]
 enum Trial {
-    Run(Report),
+    Run(Box<Report>),
     SetupError { error: String },
 }
 
@@ -150,7 +150,7 @@ impl Trial {
                 && (matches!(
                     event.reason,
                     "unknown_destination" | "non_public_destination"
-                ) || event.decision == "allow" && event.connected_ip.is_none())
+                ) || event.decision == "allow" && !event.tunnel_established)
         }) {
             return Err(("other_destination_unavailable", 2));
         }
@@ -299,7 +299,7 @@ impl Runner<'_> {
     async fn trial(&mut self, phase: &str, policy: Policy) -> Trial {
         eprintln!("veil-tell verify: {phase}");
         match self.run_trial(policy).await {
-            Ok(report) => Trial::Run(report),
+            Ok(report) => Trial::Run(Box::new(report)),
             Err(error) => {
                 eprintln!("veil-tell verify: {error}");
                 Trial::SetupError {
@@ -325,16 +325,27 @@ impl Runner<'_> {
             attribute_npm: false,
             no_attribute: true,
             json: false,
+            log: false,
             shorthand: false,
+            shim: false,
             save_baseline: false,
         };
         let execution = Execution {
             cwd: project.path(),
+            stdin: None,
             timeout: Some(self.config.timeout),
             protected_outputs: &[self.output],
             protected_dirs: &self.protected_dirs,
         };
-        run_command(options, self.fixture, policy, self.signals, execution).await
+        run_command(
+            &options,
+            self.fixture,
+            policy,
+            self.signals,
+            execution,
+            None,
+        )
+        .await
     }
 
     async fn compare(

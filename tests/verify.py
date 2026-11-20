@@ -14,7 +14,7 @@ import sys
 import tempfile
 import time
 
-from receivers import connect_probe
+from receivers import connect_probe, upstream_connect
 
 
 SCRIPT = Path(__file__).resolve()
@@ -32,6 +32,9 @@ def probe(behavior):
     if behavior == "no-contact":
         return
 
+    if behavior.startswith("upstream-"):
+        connect_probe("other.test", behavior)
+
     response = io.StringIO()
     with redirect_stdout(response):
         connect_probe("allowed.test", behavior)
@@ -46,13 +49,20 @@ def probe(behavior):
         time.sleep(30)
 
 
-def receiver_case(run, behavior, expected_connections):
+def receiver_case(run, behavior, expected_connections, upstream_hosts=()):
     def acknowledge():
         payloads = []
-        for _ in range(expected_connections):
+        for index in range(expected_connections):
             conn, _ = receiver.accept()
             with conn, conn.makefile("rb") as stream:
                 conn.settimeout(3)
+                if upstream_hosts:
+                    host = upstream_hosts[index]
+                    assert upstream_connect(stream) == f"CONNECT {host}:443 HTTP/1.1\r\n".encode()
+                    if behavior == "upstream-refused" and host == "other.test":
+                        conn.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\n")
+                        continue
+                    conn.sendall(b"HTTP/1.1 200 Established\r\n\r\n")
                 payloads.append(stream.read())
                 conn.sendall(b"ACK")
         return payloads
@@ -63,9 +73,12 @@ def receiver_case(run, behavior, expected_connections):
         receiver.settimeout(5)
         listener = pool.submit(acknowledge)
         ip, port = receiver.getsockname()
-        result = run({"VEIL_TELL_FIXTURE_RECEIVER": f"{ip}:{port}"})
+        env = ({"HTTPS_PROXY": f"http://{ip}:{port}", "NO_PROXY": ""} if upstream_hosts
+               else {"VEIL_TELL_FIXTURE_RECEIVER": f"{ip}:{port}"})
+        result = run(env)
         payloads = listener.result()
-        assert payloads == [f"{behavior}-connect".encode()] * expected_connections, payloads
+        count = expected_connections - (behavior == "upstream-refused")
+        assert payloads == [f"{behavior}-connect".encode()] * count, payloads
         assert not select.select([receiver], [], [], 0)[0], "unexpected receiver connection"
         return result
 
@@ -196,6 +209,22 @@ def run(cli, fixture):
             assert trials["restored"] is None, trials
 
         assert policy.read_text() == policy_text
+        other_rule = TARGET_RULE.format("allow").replace("allowed.test", "other.test")
+        policy.write_text(policy_text + other_rule)
+        for behavior, hosts, code, verdict, phase, reason in (
+            ("upstream-ok", ("other.test", "allowed.test", "other.test"), 0, "passes",
+             "denied", "passed_with_destination_blocked"),
+            ("upstream-refused", ("other.test", "allowed.test"), 2, "inconclusive",
+             "allowed", "other_destination_unavailable"),
+        ):
+            result, report = receiver_case(
+                lambda env: run_probe(cli, behavior, env), behavior, len(hosts), hosts,
+            )
+            trials = assert_comparison(result, report, code, verdict, phase, reason)
+            other, = (row for row in trials["allowed"]["destinations"] if row["host"] == "other.test")
+            assert other["connected_ip"] is None and other["via_upstream_proxy"], other
+
+        assert policy.read_text() == policy_text + other_rule
         assert seed.read_text() == "original\n"
         assert not (source / "trial-artifact.txt").exists()
 

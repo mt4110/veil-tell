@@ -24,7 +24,14 @@ pub struct Destination {
     pub decision: &'static str,
     pub reason: &'static str,
     pub result: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolver_hint: Option<&'static str>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub via_upstream_proxy: bool,
     pub connected_ip: Option<IpAddr>,
+    // An upstream CONNECT can succeed without revealing the destination IP.
+    #[serde(skip)]
+    pub tunnel_established: bool,
     pub attempts: u64,
     pub sent_bytes: u64,
     pub max_connection_bytes: u64,
@@ -40,6 +47,8 @@ type DestinationKey = (
     &'static str,
     &'static str,
     Option<IpAddr>,
+    Option<&'static str>,
+    bool,
 );
 
 #[derive(Default)]
@@ -54,6 +63,8 @@ impl Records {
             event.reason,
             event.result,
             event.connected_ip,
+            event.resolver_hint,
+            event.tunnel_established,
         );
         let mut records = self.0.lock().unwrap();
         if records.len() >= 4096 && !records.contains_key(&key) {
@@ -80,6 +91,34 @@ impl Records {
     }
 }
 
+pub fn aggregate(events: &[Destination]) -> Vec<Destination> {
+    let mut rows = BTreeMap::new();
+    for e in events {
+        let key = (&e.host, e.port, e.decision, e.reason);
+        rows.entry(key)
+            .and_modify(|row: &mut Destination| {
+                row.attempts += e.attempts;
+                row.sent_bytes += e.sent_bytes;
+                row.received_bytes += e.received_bytes;
+                row.max_connection_bytes = row.max_connection_bytes.max(e.max_connection_bytes);
+                if row.result != e.result {
+                    row.result = "mixed";
+                }
+                for source in &e.attribution {
+                    crate::attribution::record(&mut row.attribution, source.clone());
+                }
+            })
+            .or_insert_with(|| e.clone());
+    }
+    rows.into_values().collect()
+}
+#[derive(Serialize, serde::Deserialize)]
+pub struct DirectAttempt {
+    pub ip: IpAddr,
+    pub port: u16,
+    pub attempts: u64,
+}
+
 #[derive(Serialize)]
 pub struct Report {
     pub schema_version: u8,
@@ -87,6 +126,8 @@ pub struct Report {
     pub mode: Mode,
     pub isolation: &'static str,
     pub coverage: Coverage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direct_attempts: Option<Vec<DirectAttempt>>,
     pub child_status: Option<ChildStatus>,
     pub run_status: RunStatus,
     pub destinations: Vec<Destination>,
@@ -174,5 +215,40 @@ impl OutputFile {
             file.write_all(b"\n")?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn display_groups_multiple_public_ips_and_results() {
+        let first = Destination {
+            host: "registry.example".into(),
+            port: 443,
+            decision: "allow",
+            reason: "observe",
+            result: "completed",
+            resolver_hint: None,
+            via_upstream_proxy: false,
+            connected_ip: Some("192.0.2.1".parse().unwrap()),
+            tunnel_established: true,
+            attempts: 2,
+            sent_bytes: 50,
+            max_connection_bytes: 30,
+            received_bytes: 0,
+            attribution: Default::default(),
+        };
+        let second = Destination {
+            connected_ip: Some("192.0.2.2".parse().unwrap()),
+            result: "interrupted",
+            attempts: 1,
+            sent_bytes: 12,
+            ..first.clone()
+        };
+        let rows = aggregate(&[first, second]);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].result, "mixed");
+        assert_eq!((rows[0].attempts, rows[0].sent_bytes), (3, 62));
     }
 }

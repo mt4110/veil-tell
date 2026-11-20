@@ -11,7 +11,11 @@ Usage:
   veil-tell migrate-baseline npm|pnpm|yarn|bun|cargo FILE\n\
   veil-tell clean [--apply]\n\
   veil-tell accept\n\
-  veil-tell [--json] [--save-baseline] [--no-attribute] COMMAND [ARG...]";
+  veil-tell version | --version (run an executable named version with veil-tell -- version)
+  veil-tell agent -- COMMAND [ARG...]
+  veil-tell agent-env [--shell bash|zsh|fish]
+  veil-tell log [--today | --since DURATION] [--only-new | --only-blocked] [--json]
+  veil-tell [--log] [--json] [--save-baseline] [--no-attribute] COMMAND [ARG...]";
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
 #[serde(rename_all = "snake_case")]
@@ -37,8 +41,10 @@ pub struct Options {
     pub command: Vec<OsString>,
     pub attribute_npm: bool,
     pub no_attribute: bool,
+    pub log: bool,
     pub json: bool,
     pub shorthand: bool,
+    pub shim: bool,
     pub save_baseline: bool,
     pub comparison: crate::baseline::Options,
 }
@@ -47,11 +53,13 @@ impl Options {
     pub fn parse(mut args: Vec<OsString>) -> Result<Self> {
         let mut no_attribute = false;
         let mut save_baseline = false;
+        let mut log = false;
         let mut json = false;
         while let Some(flag) = args.first().and_then(|arg| arg.to_str()) {
             match flag {
                 "--no-attribute" if !no_attribute => no_attribute = true,
                 "--save-baseline" if !save_baseline => save_baseline = true,
+                "--log" if !log => log = true,
                 "--json" if !json => json = true,
                 _ => break,
             }
@@ -68,11 +76,20 @@ impl Options {
             attribute_npm: false,
             no_attribute,
             json,
+            log,
             shorthand: false,
+            shim: false,
             save_baseline,
             comparison: Default::default(),
         };
         match args.first().and_then(|arg| arg.to_str()) {
+            Some("--" | crate::session::SHIM_MODE) if args.len() >= 2 => {
+                options.shim = args[0] == crate::session::SHIM_MODE;
+                options.log |= options.shim;
+                options.shorthand = true;
+                options.command = args.split_off(1);
+                return Ok(options);
+            }
             Some("observe") => {}
             Some("ci") => {
                 options.backend = Backend::Isolated;

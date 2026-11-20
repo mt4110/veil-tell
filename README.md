@@ -2,6 +2,70 @@
 
 [English](README_EN.md)
 
+## AI エージェントと使う
+
+プロジェクトのシェルから、使う CLI を一つ選んで起動します。いつもの端末と認証環境を使えます。エージェントを終了したら、同じシェルで履歴を確認します。[Claude Code CLI](https://code.claude.com/docs/en/cli-reference) · [Codex CLI](https://developers.openai.com/codex/cli/) · [Cursor CLI](https://cursor.com/docs/cli/using)
+
+```sh
+veil-tell agent -- claude
+# veil-tell agent -- codex
+# veil-tell agent -- agent    # Cursor CLI
+veil-tell log --today
+```
+
+`agent --` は隔離せず、HTTPS 環境プロキシを使うクライアントの CONNECT（443 番）を observe します。終了時のセッション行には、宛先へ送信したバイト数と接続回数が入ります。起動引数、プロンプト、認証ヘッダー、TLS の中身は保存しません。同じプロキシを継承した子プロセスの通信もこの行に含まれます。npm や curl など12個の shim は自動で PATH に入り、shim 経由のコマンドはそれぞれ別の行に記録されます。`veil-tell log --today --only-blocked` で拒否だけを確認できます。
+
+直接接続、`NO_PROXY` 対象、独自のプロキシ設定、別プロセスで既に起動中の GUI はセッションの観測範囲外になり得ます。宛先が空なら、記録した CONNECT は 0 件です。上流がある場合は `http://` の CONNECT プロキシに対応します。
+
+子コマンドに shim だけを設定するには、`eval "$(veil-tell agent-env --shell zsh)"` の後で `claude`、`codex`、`agent` のいずれかを起動します。エージェントのターミナルで `command -v npm` を実行すると参照先を確認できます。絶対パスやシェルの別名は shim を迂回する場合があります。
+
+Claude Code の Bash ツールだけに設定する場合は、`SessionStart` の command hook に `veil-tell agent-env --shell bash >> "$CLAUDE_ENV_FILE"` を指定できます。[Claude Code の環境変数フック](https://code.claude.com/docs/en/hooks#persist-environment-variables)
+
+### Codex 本体の通信（macOS 実測）
+
+Codex CLI 0.155.1 がローカルの模擬 API に 1 ターン送信し、応答を受け取ったときの記録です。模擬 API は `POST /v1/responses` を 1 回受信しました。ほかの 3 ホストへの CONNECT はローカル上流で拒否され、各宛先への転送は 0 バイトでした。実アカウントや有償 API は使っていません。
+
+```text
+00:29:00  agent -- codex  exit 0
+          ✓ allowed.test:443  ×1  39465 B  observe
+          ! api.github.com:443  ×1  0 B  observe [connect_failed]
+          ! chatgpt.com:443  ×2  0 B  observe [connect_failed]
+          ! github.com:443  ×1  0 B  observe [connect_failed]
+```
+
+### npm install の通信（macOS・Linux 実測）
+
+以下は両 OS のシェルで shim を使った実測です。Puppeteer 25.17.0 に対し、レジストリだけをレビューした基準で `CI=true` を指定しました。✓ は CONNECT の許可を示します。バイト数は TLS トンネルを通じて宛先へ送信した量です。拒否行の 0 B は転送量で、子が送ろうとした総量は分かりません。
+
+macOS 27.2.1 arm64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55682 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+Debian 13 aarch64
+
+```text
+23:14:19  npm ci --no-audit --no-fund  exit 21
+          ✓ registry.npmjs.org:443  ×15  55570 B  observe ← npm (registry fetch) [inferred]
+          ✗ storage.googleapis.com:443  ×2  0 B  new_destination [new] ← puppeteer@25.17.0 postinstall [inferred, lockfile: unchanged / 要注意]
+```
+
+対応シェルは `--shell bash|zsh|fish` です。fish では `veil-tell agent-env --shell fish | source`、単発の記録には `veil-tell --log COMMAND` を使えます。shim は既定で observe となり、プロジェクトに基準がある依存コマンドには既存の判定を適用します。`veil-tell log --since 2h --only-new --json` は新規宛先の JSON Lines、`veil-tell version` はバージョンを表示します。
+
+veil-tell 自体はテレメトリーを送りません。履歴はローカルの `$XDG_STATE_HOME/veil-tell/log` に保存します。状態ディレクトリの既定値は Linux で `~/.local/state`、macOS で `~/Library/Application Support` です。URL のパス・クエリや既知の資格情報引数は伏せます。自由形式の引数には機密情報が残り得ます。`VEIL_TELL_LOG=off` で履歴を無効にできます。保存期間は30日、1日あたり10 MiBまでです。
+
+### プロキシ・キャッシュでよくある失敗
+
+- Node.js の `fetch` と `https.get` は 22 系では 22.21 から、24 系では 24.5 から両方が環境プロキシに対応します。独自のクライアントエージェントは別の経路を選べます。[Node.js のプロキシ対応](https://nodejs.org/learn/http/enterprise-network-configuration)
+- DNS の解決先がすべて 198.18.0.0/15 なら fake-IP の可能性があります。信頼する TUN 環境だけで `VEIL_TELL_ALLOW_FAKE_IP=1` を指定してください。混在・ローカル宛先は引き続き拒否します。
+- `HTTPS_PROXY` または `https_proxy` が HTTP プロキシなら、許可した CONNECT をそこへ中継します。この経路の名前解決・接続先アドレス検査は上流側が担います。接続先 IP が不明でも、成立したトンネルは通信量の基準と CI の判定に含まれます。`NO_PROXY` はホスト名・ドメイン接尾辞・任意の `:443`・`*` に対応します。
+- macOS の隔離中に `curl: (60) ... unable to get local issuer certificate` が出たら、その宛先の証明書チェーンを検証できる、信頼済みの CA バンドルを `curl --cacert /path/to/ca-bundle.pem` で指定してください。CONNECT が許可された後でも、TLS の証明書検証は失敗することがあります。
+- `VEIL_TELL_CACHE=persistent` で、隔離内に専用の `~/.cache/veil-tell/<manager>` を用意します。キャッシュ命中で消えた宛先は情報扱いです。pnpm は従来のプロジェクトストア設定も使います。
+- 一時ホームで npm・pnpm・Yarn が失敗したときは、そこにある既知のログを合計 1 MiB まで調べます。マネージャー名、検出した既知のエラーコードと説明、npm の既知のシステムコール名だけを `.veil-tell/logs/<日時>-<識別子>/manager.log` に保存し、パスを表示します。たとえば `ENOENT` と `syscall: open` で、ファイルを開く際のエラーを確認できます。パスや引数を含むログ本文はコピーしません。プロジェクトの `.gitignore` に `/.veil-tell/logs/` と `/.veil-tell/pending.json` を追加してください。
+
 ## 使い方
 
 ```sh
@@ -106,14 +170,14 @@ veil-tell restrict --backend isolated --policy "$demo_dir/state/npm.toml" \
 
 - **ローカルプロキシに届いた HTTP CONNECT を記録します。** プロキシ方式では直接通信も可能で、その試行先は観測範囲外です。
 - **隔離モードでは Node.js の名前解決の試みも記録します。** `coverage.dns_attempts` が `node_dns_lookup_hook` の場合に限ります。システムリゾルバや IP 直打ちの試みは範囲外です。[詳細](docs/dns-attempts.md)
-- **隔離モードは OS 側で直接通信を制限します。** JSON v1 の `coverage.proxy = "http_connect_requests"` と `coverage.direct_attempt_destinations = "not_observed"` は両モードに共通です。OS が拒否した直接通信や IPC の詳細は JSON に記録されません。
+- **隔離モードは OS 側で直接通信を制限します。** Linux では seccomp 通知が使えると `coverage.direct_attempt_destinations = "ip_port"` になります。未対応なら `not_observed`、記録上限到達時は `incomplete` を返します。
 - **許可したホスト経由の持ち出しは残ります。** 送信量を比較でき、CI または明示的な制限では上限超過でトンネルを閉じます。上限までのデータは届き得ます。 [送信量のしきい値と範囲](docs/volume-limits.md) たとえば、子プロセスが使える認証情報や公開アップロード機能を通じて、許可済みの GitHub や npm レジストリへ秘密情報を送れる場合があります。プロキシは TLS を終端せず、HTTP メソッド、URL パス、本文は観測・制御の範囲外です。ホストの許可は、そのホストへのトンネルを許可します。
 
 | 隔離中の観測 | Linux | macOS |
 | --- | --- | --- |
 | プロキシに届く HTTP CONNECT | ホスト名とポート | ホスト名とポート |
 | 対応する Node.js の名前解決 | ホスト名を記録して拒否 | ホスト名を記録して拒否 |
-| curl・Python・Go・Rust のシステムリゾルバ、IP 直打ち | 直接通信の試行先・件数は未観測 | 直接通信の試行先・件数は未観測 |
+| curl・Python・Go・Rust のシステムリゾルバ、IP 直打ち | 通知時は IP・ポート・件数。DNS 質問名は未観測 | 直接通信の試行先・件数は未観測 |
 
 `CI=true veil-tell npm install` は隔離と既存の基準を使い、新規 CONNECT や観測できた新規名前解決の試行で `21` を返します。ローカルの短い形式は観測した試行だけを理由に失敗させません。明示的な `observe --baseline FILE` は送信量の異常を記録して `21` を返し、制限による切断は `22` を返します。少量ずつの送信や実行をまたぐ累計は比較範囲外です。
 
@@ -129,7 +193,7 @@ LuLu・Little Snitch・OpenSnitch のホスト側制御、Firejail のプロセ�
 
 - **Linux** は非 setuid の bubblewrap と非特権 user namespace が必要です。既定のパスは `/usr/bin/bwrap` で、`VEIL_TELL_BWRAP` に信頼できる絶対パスを指定できます。作業ディレクトリは書き込み可能で、標準のランタイムディレクトリと Nix store は読み取り専用です。
 - **macOS** は非推奨の `/usr/bin/sandbox-exec` を使います。外向きの IPv4/TCP は実行専用の localhost プロキシポートに限定し、名前付き Mach サービスの検索と登録を拒否します。macOS 27.2 arm64 の受信試験では `CFMessagePort` とアプリ同梱 XPC サービスの TCP 中継を確認しました。同じ環境で、`getaddrinfo()` の A・AAAA と `DNSServiceQueryRecord()` の TXT・KEY などをユニキャスト DNS で試し、隔離時は権威 DNS に届きませんでした。
-- 隔離時は一時的なホーム、絞った環境変数、閉じた標準入力を使います。ポリシーとレポートは作業ディレクトリの外に置きます。レポートは実行ごとに未使用のパスを指定してください。
+- 隔離時は一時的なホームと絞った環境変数を使います。標準入力は通常閉じますが、`agent-env` や `agent --` の shim は呼び出し元の入力を渡すので、`curl --config -` などにパイプできます。Linux の隔離では、読み取り専用で渡す通常ファイルに有効なパスが必要です。子は読み取り専用マウントで必要な分を読み、終了時にシェルの読み取り位置を更新します。実行中は同じ入力を別のプロセスから操作しないでください。端末からの入力はバイト列として渡します。ポリシーとレポートは作業ディレクトリの外に置きます。レポートは実行ごとに未使用のパスを指定してください。
 
 ## Ubuntu で隔離と終了コード `20` を試す
 
