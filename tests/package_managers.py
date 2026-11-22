@@ -335,9 +335,8 @@ def test_cargo_roundtrip(cli, cargo_tool):
         version = subprocess.check_output([cargo_tool, "-V"], env=env, text=True).strip()
 
         def prepare_cargo_workspace(name):
-            ws = root / name
-            dep = ws / "dep"
-            app = ws / "app"
+            app = root / name
+            dep = app / "dep"
             (dep / "src").mkdir(parents=True)
             (app / "src").mkdir(parents=True)
             (dep / "Cargo.toml").write_text(
@@ -348,13 +347,13 @@ def test_cargo_roundtrip(cli, cargo_tool):
             )
             (app / "Cargo.toml").write_text(
                 '[package]\nname = "roundtrip-app"\nversion = "0.1.0"\nedition = "2024"\n'
-                '[dependencies]\nroundtrip-dep = { path = "../dep" }\n'
+                '[dependencies]\nroundtrip-dep = { path = "dep" }\n'
             )
             (app / "build.rs").write_text('fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n')
             (app / "src" / "main.rs").write_text(
                 'fn main() { println!("{}", roundtrip_dep::greeting()); }\n'
             )
-            return ws, app
+            return app, app
 
         def run_in(cwd, args, expected=0):
             res = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, timeout=60)
