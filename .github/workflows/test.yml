@@ -41,10 +41,10 @@ jobs:
             export VEIL_TELL_TEST_IP
           fi
           node_bin=$(node -p 'require("node:fs").realpathSync(process.execPath)')
-          python3 -B tests/receivers.py target/debug/veil-tell target/debug/examples/receiver_cli "$(dirname "$(dirname "$node_bin")")"
-          python3 -B tests/package_managers.py target/debug/veil-tell --persistent "$(dirname "$(dirname "$node_bin")")"
-          python3 -B tests/agent_env.py target/debug/examples/receiver_cli "$(dirname "$(dirname "$node_bin")")"
-      - run: python3 -B tests/verify.py target/debug/veil-tell target/debug/examples/receiver_cli
+          target/debug/examples/receivers_suite target/debug/veil-tell target/debug/examples/receiver_cli "$(dirname "$(dirname "$node_bin")")"
+          target/debug/examples/agent_env_suite target/debug/examples/receiver_cli "$(dirname "$(dirname "$node_bin")")" --persistent
+          target/debug/examples/agent_env_suite target/debug/examples/receiver_cli "$(dirname "$(dirname "$node_bin")")"
+      - run: target/debug/examples/verify_suite target/debug/veil-tell target/debug/examples/receiver_cli
       - name: Dependency manager lifecycle fixtures
         shell: bash
         run: |
@@ -76,8 +76,8 @@ jobs:
             ln -s ../bin/node "$runtime/$variant/node"
             trials+=("$manager=$runtime/$variant/$manager")
           done
-          python3 -B tests/package_managers.py target/debug/veil-tell "${trials[@]}" \
+          target/debug/examples/package_managers_suite target/debug/veil-tell "${trials[@]}" \
             "cargo=$(command -v cargo)" \
             "corepack=$runtime/node_modules/corepack/dist/corepack.js" \
             "node=$runtime/bin/node" "standalone=$runtime/node_modules/@pnpm/$pnpm_package/pnpm"
-      - run: python3 -B experiments/dns-attempts/probe.py
+      - run: target/debug/examples/dns_probe

@@ -23,7 +23,7 @@ const SHIMS: &[&str] = &[
 const LINE: usize = 65536;
 const DAY: u64 = 10 * 1024 * 1024;
 
-pub(super) fn state() -> Result<PathBuf> {
+pub(crate) fn state() -> Result<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| error("missing HOME"))?;
     let base = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -132,7 +132,7 @@ pub fn shim(name: &str, args: &[OsString]) -> Result<u8> {
 
 /// Keep reads from pipes and read-only regular files demand-driven. For other descriptors,
 /// hand the sandbox a one-way byte stream, never a host TTY or connected socket.
-pub(super) fn shim_stdin() -> std::io::Result<OwnedFd> {
+pub(crate) fn shim_stdin() -> std::io::Result<OwnedFd> {
     let mut input = File::from(std::io::stdin().as_fd().try_clone_to_owned()?);
     let flags = unsafe { libc::fcntl(input.as_raw_fd(), libc::F_GETFL) };
     if flags < 0 {

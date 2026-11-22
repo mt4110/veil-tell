@@ -34,7 +34,7 @@ pub(super) fn restore_upstream(command: &mut std::process::Command) {
     command.env_remove(UPSTREAM).env_remove(LOCAL_PROXY);
 }
 
-pub(super) async fn run(args: &[OsString], fixture: Option<FixtureResolver>) -> Result<u8> {
+pub(crate) async fn run(args: &[OsString], fixture: Option<FixtureResolver>) -> Result<u8> {
     let [separator, program, rest @ ..] = args else {
         return Err(error("usage: veil-tell agent -- COMMAND [ARG...]"));
     };

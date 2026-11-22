@@ -1,22 +1,14 @@
-mod agent;
-mod attribution;
-mod baseline;
-mod cargo_attribution;
-mod cli;
-mod isolation;
-mod lockfile;
-mod manager;
-mod manager_files;
-mod pnpm;
-mod policy;
-mod proxy;
-mod report;
-mod rollup;
-mod session;
-mod summary;
-mod upstream;
-mod verify;
-mod volume;
+pub mod application;
+pub mod domain;
+pub mod infrastructure;
+pub mod interface;
+
+pub(crate) use application::{agent, rollup, session, verify};
+pub(crate) use domain::{baseline, lockfile, manager, policy, report, volume};
+pub(crate) use infrastructure::{
+    attribution, cargo_attribution, isolation, manager_files, pnpm, proxy, upstream,
+};
+pub(crate) use interface::{cli, summary};
 
 use base64::Engine;
 use cli::{Backend, Mode, Options};
