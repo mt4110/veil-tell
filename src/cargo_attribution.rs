@@ -34,6 +34,7 @@ impl Toolchain {
         let (entry, resolved) = find_executable(program, cwd, path_env)?;
         let rustup = rustup_binary(&entry, &resolved, cwd, path_env)?;
         let output = Command::new(rustup)
+            .arg0("rustup")
             .args(["which", "cargo"])
             .current_dir(cwd)
             .env("PATH", path_env)
@@ -52,6 +53,9 @@ impl Toolchain {
             return None;
         }
         let cargo = PathBuf::from(raw_path).canonicalize().ok()?;
+        if cargo == resolved {
+            return None;
+        }
         let bin_dir = cargo.parent()?.to_path_buf();
         let bind_root = bin_dir.parent()?.to_path_buf();
         let cargo_meta = cargo.metadata().ok()?;
@@ -89,11 +93,12 @@ fn find_executable(program: &OsStr, cwd: &Path, path_env: &OsStr) -> Option<(Pat
 }
 
 fn rustup_binary(entry: &Path, resolved: &Path, _cwd: &Path, _path_env: &OsStr) -> Option<PathBuf> {
-    if resolved.file_name() == Some(OsStr::new("rustup")) {
+    if matches!(
+        resolved.file_name().and_then(OsStr::to_str),
+        Some("rustup" | "rustup-init")
+    ) {
         return Some(resolved.to_path_buf());
     }
-    let entry_meta = entry.metadata().ok()?;
-    let resolved_meta = resolved.metadata().ok()?;
     let entry_dir = entry.parent()?;
     let resolved_dir = resolved.parent()?;
     for dir in [entry_dir, resolved_dir] {
@@ -101,8 +106,6 @@ fn rustup_binary(entry: &Path, resolved: &Path, _cwd: &Path, _path_env: &OsStr) 
         if let Ok(meta) = sibling.metadata()
             && meta.is_file()
             && meta.mode() & 0o111 != 0
-            && ((meta.dev() == entry_meta.dev() && meta.ino() == entry_meta.ino())
-                || (meta.dev() == resolved_meta.dev() && meta.ino() == resolved_meta.ino()))
         {
             return Some(sibling);
         }
@@ -295,5 +298,19 @@ mod tests {
         assert_eq!(resolved.cargo, tc_cargo);
         assert_eq!(resolved.bin_dir, tc_bin);
         assert_eq!(resolved.bind_root, toolchain);
+
+        // 3. Symlink to rustup-init in another directory (Homebrew rustup style) -> resolves toolchain
+        let brew_opt = root.join("brew/opt/rustup/bin");
+        let brew_bin = root.join("brew/bin");
+        fs::create_dir_all(&brew_opt).unwrap();
+        fs::create_dir_all(&brew_bin).unwrap();
+        let rustup_init = brew_opt.join("rustup-init");
+        fs::copy(&rustup, &rustup_init).unwrap();
+        fs::set_permissions(&rustup_init, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&rustup_init, brew_bin.join("cargo")).unwrap();
+        let resolved_brew =
+            Toolchain::resolve_with_path(&[OsString::from("cargo")], &root, brew_bin.as_os_str())
+                .unwrap();
+        assert_eq!(resolved_brew.cargo, tc_cargo);
     }
 }
