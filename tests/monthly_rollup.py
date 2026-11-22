@@ -283,6 +283,65 @@ class MonthlyRollupTests(unittest.TestCase):
         self.assertEqual(total["prs_completely_missing"], 0)
         self.assertEqual(total["effectiveness_status"], "partial_or_pending_review")
 
+    def test_unregistered_target_heads_excluded_and_base_checkout_preserved_in_coverage(self):
+        # 1. PR 70 registers target_heads=["h2"] only, while runs only contain head "h1"
+        #    with an evaluated, notifying run -> must be excluded from primary aggregation:
+        #    prs_with_runs=0, prs_alerted=0, prs_completely_missing=1, unregistered_target_runs=1.
+        # 2. PR 71 registers target_heads=["h1"] and runs against two bases:
+        #    (b1, h1, checkout1) is evaluated, while (b2, h1, checkout2) is cancelled ->
+        #    coverage must preserve base/checkout identity and report prs_partially_evaluated=1,
+        #    effectiveness_status="partial_or_pending_review" (not ready).
+        ledger = {
+            "window_start": "2026-12-01T00:00:00Z",
+            "window_end": "2026-12-31T00:00:00Z",
+            "repositories": [
+                {"repo": "mt4110/veil-tell", "manager": "npm", "required_jobs": ["check"]},
+            ],
+            "target_prs": [
+                {"repo": "mt4110/veil-tell", "pr": 70, "manager": "npm", "kind": "natural", "target_heads": ["h2"]},
+                {"repo": "mt4110/veil-tell", "pr": 71, "manager": "npm", "kind": "natural", "target_heads": ["h1"]},
+            ],
+            "runs": [
+                # Unregistered head h1 for PR 70 (target_heads=["h2"])
+                {
+                    "repo": "mt4110/veil-tell", "pr": 70, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "h1", "checkout_sha": "c1",
+                    "job_matrix": "check", "run_id": 700, "run_attempt": 1,
+                    "completed_at": "2026-12-05T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [{"kind": "new", "review": "actionable_true_positive"}],
+                },
+                # Registered head h1 for PR 71 on (b1, h1, c1) -> evaluated
+                {
+                    "repo": "mt4110/veil-tell", "pr": 71, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "h1", "checkout_sha": "c1",
+                    "job_matrix": "check", "run_id": 710, "run_attempt": 1,
+                    "completed_at": "2026-12-06T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "none",
+                    "reasons": [],
+                },
+                # Same head h1 for PR 71 on updated base (b2, h1, c2) -> cancelled (incomplete)
+                {
+                    "repo": "mt4110/veil-tell", "pr": 71, "manager": "npm",
+                    "base_sha": "b2", "pr_head_sha": "h1", "checkout_sha": "c2",
+                    "job_matrix": "check", "run_id": 711, "run_attempt": 1,
+                    "completed_at": "2026-12-07T00:00:00Z",
+                    "status": "cancelled", "summary_displayed": "none",
+                    "reasons": [],
+                },
+            ],
+        }
+        row = self.mod.rollup_ledger(ledger)["groups"][0]
+        self.assertEqual(row["target_prs"], 2)
+        self.assertEqual(row["prs_with_runs"], 1)
+        self.assertEqual(row["prs_alerted"], 0)
+        self.assertEqual(row["actual_notification_runs"], 0)
+        self.assertEqual(row["prs_fully_evaluated"], 0)
+        self.assertEqual(row["prs_partially_evaluated"], 1)
+        self.assertEqual(row["prs_completely_missing"], 1)
+        self.assertEqual(len(row["unregistered_target_runs"]), 1)
+        self.assertEqual(row["effectiveness_status"], "partial_or_pending_review")
+
 
 if __name__ == "__main__":
     unittest.main()

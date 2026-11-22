@@ -43,7 +43,42 @@ def empty_kind_counts():
     return {kind: 0 for kind in ALERT_KINDS}
 
 
+def _run_matches_entry(run, entry, default_mgr):
+    mgr = entry.get("manager", default_mgr)
+    run_mgr = run.get("manager", default_mgr)
+    if run_mgr != mgr:
+        return False
+
+    explicit_revs = entry.get("target_revisions")
+    if explicit_revs:
+        matched_rev = False
+        for rev in explicit_revs:
+            head = rev.get("pr_head_sha") or rev.get("head_sha")
+            if head and run.get("pr_head_sha") != head:
+                continue
+            base = rev.get("base_sha")
+            if base is not None and run.get("base_sha", "") != base:
+                continue
+            checkout = rev.get("checkout_sha")
+            if checkout is not None and run.get("checkout_sha", "") != checkout:
+                continue
+            matched_rev = True
+            break
+        if not matched_rev:
+            return False
+
+    target_heads = entry.get("target_heads")
+    if target_heads and run.get("pr_head_sha") not in target_heads:
+        return False
+    if entry.get("base_sha") is not None and run.get("base_sha", "") != entry.get("base_sha"):
+        return False
+    if entry.get("checkout_sha") is not None and run.get("checkout_sha", "") != entry.get("checkout_sha"):
+        return False
+    return True
+
+
 def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, required_jobs, config_intervals, outages):
+    default_mgr = "npm" if manager_key == "all" else manager_key
     natural_entries = [p for p in prs if p.get("kind", "natural") == "natural"]
     non_natural_entries = [p for p in prs if p.get("kind", "natural") != "natural"]
 
@@ -61,16 +96,34 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
             seen_non_natural_prs.add(unique_key)
             non_natural_counts[kind] += 1
 
-    # Filter runs into natural vs non-natural and enforce half-open [window_start, window_end)
+    # Filter runs into natural vs non-natural, enforce registered target heads/revisions,
+    # and enforce half-open [window_start, window_end)
     in_window_natural_runs = []
     pre_window_runs = []
     post_deadline_runs = []
+    unregistered_target_runs = []
     non_natural_runs_count = 0
 
     for run in runs:
         pr_id = (run["repo"], run["pr"])
         if pr_id not in natural_pr_ids:
             non_natural_runs_count += 1
+            continue
+        if not any(_run_matches_entry(run, entry, default_mgr) for entry in natural_entries_by_pr[pr_id]):
+            unregistered_target_runs.append(
+                {
+                    "repo": run["repo"],
+                    "pr": run["pr"],
+                    "manager": run.get("manager", default_mgr),
+                    "base_sha": run.get("base_sha"),
+                    "pr_head_sha": run.get("pr_head_sha"),
+                    "checkout_sha": run.get("checkout_sha"),
+                    "job_matrix": run.get("job_matrix"),
+                    "run_id": run.get("run_id"),
+                    "run_attempt": run.get("run_attempt"),
+                    "completed_at": run.get("completed_at"),
+                }
+            )
             continue
         completed = parse_utc(run.get("completed_at"))
         if window_start is not None and completed is not None and completed < window_start:
@@ -219,32 +272,72 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
             prs_with_runs += 1
 
         default_mgr = "npm" if manager_key == "all" else manager_key
-        expected_triples = set()
-        evaluated_triples = set()
+        expected_targets = set()
+        evaluated_targets = set()
 
         for entry in pr_entries:
             mgr = entry.get("manager", default_mgr)
-            mgr_runs = [r for r in pr_runs if r.get("manager", default_mgr) == mgr]
+            entry_runs = [r for r in pr_runs if _run_matches_entry(r, entry, default_mgr)]
             target_heads = entry.get("target_heads")
             if not target_heads:
-                heads = {r.get("pr_head_sha") for r in mgr_runs if r.get("pr_head_sha")}
+                heads = {r.get("pr_head_sha") for r in entry_runs if r.get("pr_head_sha")}
                 target_heads = sorted(heads) if heads else ["(unknown-head)"]
 
             jobs = entry.get("required_jobs") or required_jobs or sorted(
-                {r.get("job_matrix", "default") for r in mgr_runs} or {"default"}
+                {r.get("job_matrix", "default") for r in entry_runs} or {"default"}
             )
+
+            expected_revisions = set()
+            explicit_revs = entry.get("target_revisions")
+            if explicit_revs:
+                for rev in explicit_revs:
+                    expected_revisions.add(
+                        (
+                            rev.get("base_sha", ""),
+                            rev.get("pr_head_sha") or rev.get("head_sha") or target_heads[0],
+                            rev.get("checkout_sha", ""),
+                        )
+                    )
             for h in target_heads:
-                for j in jobs:
-                    expected_triples.add((mgr, h, j))
-            for r in mgr_runs:
-                if r.get("status", "evaluated") in EVALUATABLE_STATUSES:
-                    evaluated_triples.add(
-                        (mgr, r.get("pr_head_sha") or target_heads[0], r.get("job_matrix", "default"))
+                head_runs = [
+                    r for r in entry_runs if (r.get("pr_head_sha") or target_heads[0]) == h
+                ]
+                for r in head_runs:
+                    expected_revisions.add(
+                        (
+                            r.get("base_sha", ""),
+                            h,
+                            r.get("checkout_sha", ""),
+                        )
+                    )
+                if not head_runs and not any(rev[1] == h for rev in expected_revisions):
+                    expected_revisions.add(
+                        (
+                            entry.get("base_sha", ""),
+                            h,
+                            entry.get("checkout_sha", ""),
+                        )
                     )
 
-        if expected_triples and expected_triples <= evaluated_triples:
+            for base_sha, head_sha, checkout_sha in expected_revisions:
+                for j in jobs:
+                    expected_targets.add((mgr, base_sha, head_sha, checkout_sha, j))
+
+            for r in entry_runs:
+                if r.get("status", "evaluated") in EVALUATABLE_STATUSES:
+                    evaluated_targets.add(
+                        (
+                            mgr,
+                            r.get("base_sha", ""),
+                            r.get("pr_head_sha") or target_heads[0],
+                            r.get("checkout_sha", ""),
+                            r.get("job_matrix", "default"),
+                        )
+                    )
+
+        if expected_targets and expected_targets <= evaluated_targets:
             prs_fully_evaluated += 1
-        elif evaluated_triples:
+        elif evaluated_targets:
             prs_partially_evaluated += 1
         else:
             prs_completely_missing += 1
@@ -345,6 +438,7 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
         "non_natural_runs": non_natural_runs_count,
         "pre_window_runs": pre_window_runs,
         "post_deadline_runs": post_deadline_runs,
+        "unregistered_target_runs": unregistered_target_runs,
         "config_intervals": config_intervals,
         "outages": outages,
         "effectiveness_status": effectiveness_status,
