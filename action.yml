@@ -78,12 +78,13 @@ runs:
         set -euo pipefail
         state=$(mktemp -d "$RUNNER_TEMP/veil-tell-state.XXXXXX")
         report_path="$state/report.json"
+        cli="$RUNNER_TEMP/veil-tell/bin/veil-tell"
         printf 'report=%s\n' "$report_path" >> "$GITHUB_OUTPUT"
 
         fail_before_run() {
           local message="$1"
           echo "$message" >&2
-          python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$report_path" \
+          "$cli" summary "$report_path" \
             --github-output "$GITHUB_OUTPUT" \
             --missing-reason "$message" >> "$GITHUB_STEP_SUMMARY" || true
           printf 'status=125\n' >> "$GITHUB_OUTPUT"
@@ -122,7 +123,6 @@ runs:
           export PATH="$runtime/bin:$PATH"
         fi
         status=0
-        cli="$RUNNER_TEMP/veil-tell/bin/veil-tell"
         if [[ "$VEIL_COMMAND" =~ ^(npm|pnpm|yarn|bun|cargo)([[:space:]][a-zA-Z0-9_./=:-]+)+$ ]]; then
           read -r -a argv <<< "$VEIL_COMMAND"
           "$cli" ci --baseline "$state/baseline.json" --report "$report_path" -- "${argv[@]}" || status=$?
@@ -130,7 +130,7 @@ runs:
           "$cli" ci --attribute-npm --baseline "$state/baseline.json" \
             --report "$report_path" -- /bin/sh -ec "$VEIL_COMMAND" || status=$?
         fi
-        python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$report_path" \
+        "$cli" summary "$report_path" \
           --github-output "$GITHUB_OUTPUT" \
           --missing-reason "veil-tell exited with status $status without writing report.json." \
           >> "$GITHUB_STEP_SUMMARY" ||
@@ -147,5 +147,5 @@ runs:
       run: |
         set -euo pipefail
         comment=$(mktemp "$RUNNER_TEMP/veil-tell-comment.XXXXXX")
-        python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$VEIL_REPORT" > "$comment"
+        "$RUNNER_TEMP/veil-tell/bin/veil-tell" summary "$VEIL_REPORT" > "$comment"
         gh pr comment "$VEIL_PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$comment"

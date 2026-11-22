@@ -11,7 +11,9 @@ mod pnpm;
 mod policy;
 mod proxy;
 mod report;
+mod rollup;
 mod session;
+mod summary;
 mod upstream;
 mod verify;
 mod volume;
@@ -848,6 +850,8 @@ async fn dispatch(args: Vec<OsString>, fixture: Option<FixtureResolver>) -> Resu
         Some("agent") => return agent::run(&args[1..], fixture).await,
         Some("agent-env") => return session::agent_env(&args[1..]),
         Some("log") => return session::show(&args[1..]),
+        Some("summary") => return summary::run(&args[1..]),
+        Some("rollup") => return rollup::run(&args[1..]),
         _ => {}
     }
     if args.as_slice() == ["--version"] || args.as_slice() == ["version"] {

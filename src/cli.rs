@@ -15,6 +15,8 @@ Usage:
   veil-tell agent -- COMMAND [ARG...]
   veil-tell agent-env [--shell bash|zsh|fish]
   veil-tell log [--today | --since DURATION] [--only-new | --only-blocked] [--json]
+  veil-tell summary REPORT.JSON [--github-output FILE] [--missing-reason TEXT]
+  veil-tell rollup LEDGER.JSON [--format markdown|json|both] [--out-json FILE] [--out-md FILE]
   veil-tell [--log] [--json] [--save-baseline] [--no-attribute] COMMAND [ARG...]";
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
