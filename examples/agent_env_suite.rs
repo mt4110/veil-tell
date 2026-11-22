@@ -455,14 +455,15 @@ pub fn trial(fixture: &Path, node_root: &Path, cache: bool) {
     }
 
     if cfg!(target_os = "linux") {
-        let self_str = self_exe.to_str().unwrap();
+        let local_checker = project.join("check_stdin");
+        fs::copy(&self_exe, &local_checker).unwrap();
         let mut stream = fs::File::open(&source_input).unwrap();
         stream.seek(SeekFrom::Start(7)).unwrap();
         let stream_check = stream.try_clone().unwrap();
         let script = format!("{setup}\nexec \"$@\"");
-        let alias = format!("alias.checkinput=!{self_str} --check-stdin");
+        let alias = "alias.checkinput=!./check_stdin --check-stdin";
         let mut c = Command::new("/bin/sh");
-        c.args(["-c", &script, "test", "git", "-c", &alias, "checkinput"])
+        c.args(["-c", &script, "test", "git", "-c", alias, "checkinput"])
             .current_dir(&project)
             .env_clear();
         for (k, v) in &base_env {
