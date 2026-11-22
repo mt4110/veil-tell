@@ -36,6 +36,7 @@ pub struct LaunchConfig<'a> {
     pub node_attribution: bool,
     pub project_home: Option<&'a Path>,
     pub pnpm_runtime: Option<&'a crate::pnpm::Runtime>,
+    pub cargo_runtime: Option<&'a crate::cargo_attribution::Toolchain>,
 }
 
 pub async fn prepare(
@@ -134,6 +135,9 @@ pub async fn prepare(
             let mut launch = Command::new("/usr/bin/sandbox-exec");
             launch.args(["-p", &profile]).args(command);
             restricted_env(&mut launch, home_path);
+            if let Some(toolchain) = config.cargo_runtime {
+                launch.env("PATH", prepended_path(&toolchain.bin_dir));
+            }
             if let Some(runtime) = config.pnpm_runtime.filter(|runtime| runtime.corepack) {
                 crate::pnpm::configure_corepack(&mut launch, runtime.corepack_cache.as_deref());
             }
@@ -267,6 +271,15 @@ pub fn restricted_env(command: &mut Command, home: &Path) {
     if std::env::var_os("PATH").is_none() {
         command.env("PATH", "/usr/local/bin:/usr/bin:/bin");
     }
+}
+
+pub fn prepended_path(dir: &Path) -> OsString {
+    let current =
+        std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+    std::env::join_paths(
+        std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&current)),
+    )
+    .unwrap_or(current)
 }
 
 pub const NODE_DNS_HOOK: &str = include_str!("node_dns.cjs");

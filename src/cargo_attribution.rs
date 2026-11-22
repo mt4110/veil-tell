@@ -1,9 +1,12 @@
 use crate::attribution::{self, Package};
 use crate::{Result, error};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
-use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+use std::os::unix::{
+    fs::{MetadataExt, PermissionsExt},
+    process::CommandExt,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -11,6 +14,99 @@ pub const RUSTC_MODE: &str = "__veil_tell_rustc";
 pub const BUILD_MODE: &str = "__veil_tell_build_script";
 #[cfg(target_os = "linux")]
 pub const LINUX_WRAPPER: &str = "/veil-tell-rustc";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Toolchain {
+    pub cargo: PathBuf,
+    pub bin_dir: PathBuf,
+    pub bind_root: PathBuf,
+}
+
+impl Toolchain {
+    pub fn resolve(command: &[OsString], cwd: &Path) -> Option<Self> {
+        let path_env =
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
+        Self::resolve_with_path(command, cwd, &path_env)
+    }
+
+    fn resolve_with_path(command: &[OsString], cwd: &Path, path_env: &OsStr) -> Option<Self> {
+        let program = command.first()?;
+        let (entry, resolved) = find_executable(program, cwd, path_env)?;
+        let rustup = rustup_binary(&entry, &resolved, cwd, path_env)?;
+        let output = Command::new(rustup)
+            .args(["which", "cargo"])
+            .current_dir(cwd)
+            .env("PATH", path_env)
+            // Block any implicit toolchain download while querying the active toolchain path.
+            .env("HTTP_PROXY", "http://127.0.0.1:9")
+            .env("HTTPS_PROXY", "http://127.0.0.1:9")
+            .env("ALL_PROXY", "http://127.0.0.1:9")
+            .env("RUSTUP_AUTO_INSTALL", "0")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw_path = std::str::from_utf8(&output.stdout).ok()?.trim();
+        if raw_path.is_empty() {
+            return None;
+        }
+        let cargo = PathBuf::from(raw_path).canonicalize().ok()?;
+        let bin_dir = cargo.parent()?.to_path_buf();
+        let bind_root = bin_dir.parent()?.to_path_buf();
+        let cargo_meta = cargo.metadata().ok()?;
+        let rustc_meta = bin_dir.join("rustc").metadata().ok()?;
+        (cargo_meta.is_file()
+            && cargo_meta.mode() & 0o111 != 0
+            && rustc_meta.is_file()
+            && rustc_meta.mode() & 0o111 != 0)
+            .then_some(Self {
+                cargo,
+                bin_dir,
+                bind_root,
+            })
+    }
+
+    pub fn command(&self, command: &[OsString]) -> Vec<OsString> {
+        std::iter::once(self.cargo.clone().into_os_string())
+            .chain(command[1..].iter().cloned())
+            .collect()
+    }
+}
+
+fn find_executable(program: &OsStr, cwd: &Path, path_env: &OsStr) -> Option<(PathBuf, PathBuf)> {
+    let resolve = |candidate: PathBuf| {
+        let entry = cwd.join(candidate);
+        let resolved = entry.canonicalize().ok()?;
+        let metadata = resolved.metadata().ok()?;
+        (metadata.is_file() && metadata.mode() & 0o111 != 0).then_some((entry, resolved))
+    };
+    let path = Path::new(program);
+    if path.as_os_str().as_encoded_bytes().contains(&b'/') {
+        return resolve(path.to_path_buf());
+    }
+    std::env::split_paths(path_env).find_map(|dir| resolve(dir.join(program)))
+}
+
+fn rustup_binary(entry: &Path, resolved: &Path, _cwd: &Path, _path_env: &OsStr) -> Option<PathBuf> {
+    if resolved.file_name() == Some(OsStr::new("rustup")) {
+        return Some(resolved.to_path_buf());
+    }
+    let entry_dir = entry.parent()?;
+    let resolved_dir = resolved.parent()?;
+    for dir in [entry_dir, resolved_dir] {
+        let sibling = dir.join("rustup");
+        let has_rustc = dir.join("rustc").is_file();
+        if !has_rustc
+            && let Ok(meta) = sibling.metadata()
+            && meta.is_file()
+            && meta.mode() & 0o111 != 0
+        {
+            return Some(sibling);
+        }
+    }
+    None
+}
 
 pub fn configure(command: &mut tokio::process::Command, wrapper: &Path, cwd: &Path) {
     command
@@ -139,4 +235,61 @@ fn identify() -> Option<Package> {
         path,
     };
     package.valid().then_some(package)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_rustup_shim_without_touching_plain_cargo() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+
+        // 1. Plain cargo alongside rustc (no rustup shim) -> returns None
+        let plain_bin = root.join("plain-bin");
+        fs::create_dir(&plain_bin).unwrap();
+        for name in ["cargo", "rustc"] {
+            let p = plain_bin.join(name);
+            fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(
+            Toolchain::resolve_with_path(&[OsString::from("cargo")], &root, plain_bin.as_os_str()),
+            None
+        );
+
+        // 2. Rustup shim directory with hardlinked/symlinked cargo -> resolves toolchain
+        let toolchain = root.join("rustup/toolchains/stable");
+        let tc_bin = toolchain.join("bin");
+        fs::create_dir_all(&tc_bin).unwrap();
+        for name in ["cargo", "rustc"] {
+            let p = tc_bin.join(name);
+            fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let shim_bin = root.join("cargo-home/bin");
+        fs::create_dir_all(&shim_bin).unwrap();
+        let rustup = shim_bin.join("rustup");
+        let tc_cargo = tc_bin.join("cargo");
+        fs::write(
+            &rustup,
+            format!("#!/bin/sh\nif [ \"$1\" = which ] && [ \"$2\" = cargo ]; then echo \"{}\"; exit 0; fi\nexit 1\n", tc_cargo.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
+        let shim_cargo = shim_bin.join("cargo");
+        fs::hard_link(&rustup, &shim_cargo).unwrap();
+
+        let resolved = Toolchain::resolve_with_path(
+            &[OsString::from("cargo")],
+            &root,
+            shim_bin.as_os_str(),
+        )
+        .unwrap();
+        assert_eq!(resolved.cargo, tc_cargo);
+        assert_eq!(resolved.bin_dir, tc_bin);
+        assert_eq!(resolved.bind_root, toolchain);
+    }
 }

@@ -263,9 +263,19 @@ async fn run_command(
     } else {
         (None, None)
     };
+    let cargo_runtime = if options.backend == Backend::Isolated && executable == Some("cargo") {
+        cargo_attribution::Toolchain::resolve(&options.command, cwd)
+    } else {
+        None
+    };
     let command = pnpm_runtime
         .as_ref()
-        .map(|runtime| runtime.command(&options.command));
+        .map(|runtime| runtime.command(&options.command))
+        .or_else(|| {
+            cargo_runtime
+                .as_ref()
+                .map(|toolchain| toolchain.command(&options.command))
+        });
     let node_manager = match executable {
         Some("pnpm") => Some("pnpm"),
         Some("yarn") => Some("yarn"),
@@ -375,6 +385,7 @@ async fn run_command(
             node_attribution: attribute_node,
             project_home: project_home.as_deref(),
             pnpm_runtime: pnpm_runtime.as_ref(),
+            cargo_runtime: cargo_runtime.as_ref(),
         },
     )
     .await?;

@@ -138,9 +138,11 @@ pub async fn prepare(
         }
     }
     // Keep the helper environment independent of the caller's loader configuration.
-    launch
-        .args(["--setenv", "PATH"])
-        .arg(std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
+    let child_path = config
+        .cargo_runtime
+        .map(|toolchain| crate::isolation::prepended_path(&toolchain.bin_dir))
+        .unwrap_or_else(|| std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()));
+    launch.args(["--setenv", "PATH"]).arg(child_path);
     for (key, value) in std::env::vars_os() {
         if matches!(key.to_str(), Some("LANG" | "TERM"))
             || key.to_str().is_some_and(|key| key.starts_with("LC_"))
@@ -216,6 +218,14 @@ pub async fn prepare(
             }
             launch.args(["--setenv", "VEIL_TELL_RELAY_COREPACK_CACHE", COREPACK_CACHE]);
         }
+    }
+    if let Some(toolchain) = config.cargo_runtime
+        && !runtime_visible(&toolchain.bind_root, cwd)
+    {
+        launch
+            .arg("--ro-bind")
+            .arg(&toolchain.bind_root)
+            .arg(&toolchain.bind_root);
     }
     supervise_stdio(&mut launch);
     let file_stdin = stdin::FileInput::prepare(&mut launch, config.stdin, temporary.path())?;
