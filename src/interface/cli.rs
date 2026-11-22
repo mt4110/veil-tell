@@ -1,6 +1,5 @@
 use crate::{Result, error};
 use std::ffi::OsString;
-use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 Usage:
@@ -19,37 +18,7 @@ Usage:
   veil-tell rollup LEDGER.JSON [--format markdown|json|both] [--out-json FILE] [--out-md FILE]
   veil-tell [--log] [--json] [--save-baseline] [--no-attribute] COMMAND [ARG...]";
 
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum Mode {
-    Observe,
-    Restrict,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum Backend {
-    Proxy,
-    Isolated,
-}
-
-pub struct Options {
-    pub mode: Mode,
-    pub backend: Backend,
-    pub policy: Option<PathBuf>,
-    pub report: Option<PathBuf>,
-    pub emit_policy: Option<PathBuf>,
-    pub fail_on_unknown: bool,
-    pub command: Vec<OsString>,
-    pub attribute_npm: bool,
-    pub no_attribute: bool,
-    pub log: bool,
-    pub json: bool,
-    pub shorthand: bool,
-    pub shim: bool,
-    pub save_baseline: bool,
-    pub comparison: crate::baseline::Options,
-}
+pub use crate::domain::attribution_model::{Backend, Mode, Options};
 
 impl Options {
     pub fn parse(mut args: Vec<OsString>) -> Result<Self> {

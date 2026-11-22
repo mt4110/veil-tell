@@ -1,5 +1,5 @@
 use crate::Result;
-use crate::cli::{Backend, Mode};
+use crate::domain::attribution_model::{self as attribution, Backend, Mode};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -14,7 +14,7 @@ use std::sync::Mutex;
 pub struct Attempted {
     pub host: String,
     pub attempts: u64,
-    pub attribution: crate::attribution::Sources,
+    pub attribution: attribution::Sources,
 }
 
 #[derive(Clone, Serialize)]
@@ -36,8 +36,8 @@ pub struct Destination {
     pub sent_bytes: u64,
     pub max_connection_bytes: u64,
     pub received_bytes: u64,
-    #[serde(skip_serializing_if = "crate::attribution::Sources::is_empty")]
-    pub attribution: crate::attribution::Sources,
+    #[serde(skip_serializing_if = "attribution::Sources::is_empty")]
+    pub attribution: attribution::Sources,
 }
 
 type DestinationKey = (
@@ -79,7 +79,7 @@ impl Records {
                     total.max_connection_bytes.max(event.max_connection_bytes);
                 total.received_bytes += event.received_bytes;
                 for source in &event.attribution {
-                    crate::attribution::record(&mut total.attribution, source.clone());
+                    attribution::record(&mut total.attribution, source.clone());
                 }
             })
             .or_insert(event);
@@ -105,7 +105,7 @@ pub fn aggregate(events: &[Destination]) -> Vec<Destination> {
                     row.result = "mixed";
                 }
                 for source in &e.attribution {
-                    crate::attribution::record(&mut row.attribution, source.clone());
+                    attribution::record(&mut row.attribution, source.clone());
                 }
             })
             .or_insert_with(|| e.clone());

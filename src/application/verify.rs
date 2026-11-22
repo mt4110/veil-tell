@@ -1,7 +1,7 @@
 use crate::{
     Execution, FixtureResolver, Result, RunSignals,
-    cli::{Backend, Mode, Options},
-    error, isolation,
+    domain::attribution_model::{Backend, Mode, Options},
+    error,
     policy::{Policy, normalize_host},
     report::{OutputFile, Report},
     run_command,
@@ -194,15 +194,10 @@ struct Destination<'a> {
 }
 
 pub async fn run(
-    mut args: impl Iterator<Item = OsString>,
+    args: impl Iterator<Item = OsString>,
     fixture: Option<FixtureResolver>,
 ) -> Result<u8> {
-    let first = args.next();
-    if first.as_ref().is_some_and(|arg| isolation::is_help(arg)) {
-        println!("{}", crate::cli::USAGE);
-        return Ok(0);
-    }
-    let config = Config::parse(first.into_iter().chain(args))?;
+    let config = Config::parse(args)?;
     let source = config.source.canonicalize()?;
     if !source.is_dir() {
         return Err(error("--source must be a directory"));

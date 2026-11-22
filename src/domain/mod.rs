@@ -1,3 +1,4 @@
+pub mod attribution_model;
 pub mod baseline;
 pub mod lockfile;
 pub mod manager;

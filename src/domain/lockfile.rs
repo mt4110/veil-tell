@@ -1,4 +1,4 @@
-use crate::attribution::Package;
+use crate::domain::attribution_model::Package;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;

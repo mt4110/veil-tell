@@ -46,7 +46,7 @@ pub struct Anomaly {
     pub observed: Sample,
     pub limits: Sample,
     pub blocked: bool,
-    pub attribution: crate::attribution::Sources,
+    pub attribution: crate::domain::attribution_model::Sources,
 }
 
 pub struct Budget {
@@ -130,7 +130,7 @@ pub fn anomalies(
         anomaly.observed.record(event);
         anomaly.blocked |= event.result == "volume_blocked";
         for source in &event.attribution {
-            crate::attribution::record(&mut anomaly.attribution, source.clone());
+            crate::domain::attribution_model::record(&mut anomaly.attribution, source.clone());
         }
     }
     found
