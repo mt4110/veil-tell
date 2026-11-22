@@ -1,5 +1,6 @@
 """Local dependency lifecycle fixtures. Pass the executable paths to test."""
 
+import gzip
 import io
 import json
 import os
@@ -149,14 +150,16 @@ def write_tarball_package(target_tgz):
         "package/index.js": ("module.exports = { ok: true, version: '1.0.0' };\n", 0o644),
         "package/bin.js": ("#!/usr/bin/env node\nconsole.log('roundtrip-ok');\n", 0o755),
     }
-    with tarfile.open(target_tgz, "w:gz") as tar:
-        for name, (content, mode) in files.items():
-            data = content.encode("utf-8")
-            info = tarfile.TarInfo(name=name)
-            info.size = len(data)
-            info.mode = mode
-            info.mtime = 0
-            tar.addfile(info, io.BytesIO(data))
+    with open(target_tgz, "wb") as raw:
+        with gzip.GzipFile(filename="", mode="wb", fileobj=raw, mtime=0) as gz:
+            with tarfile.open(fileobj=gz, mode="w") as tar:
+                for name, (content, mode) in files.items():
+                    data = content.encode("utf-8")
+                    info = tarfile.TarInfo(name=name)
+                    info.size = len(data)
+                    info.mode = mode
+                    info.mtime = 0
+                    tar.addfile(info, io.BytesIO(data))
 
 
 def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_env, version, yarn_pnp=False):
@@ -247,10 +250,9 @@ def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_en
             out = run_in(proj, [local_tool, "roundtrip-cli"], run_env)
             assert "roundtrip-ok" in out.stdout, out.stdout
             return
-        js_runner = local_tool if manager == "bun" else "node"
         run_in(
             proj,
-            [js_runner, "-e", "const d = require('roundtrip-dep'); if (!d.ok || d.version !== '1.0.0') process.exit(1);"],
+            ["node", "-e", "const d = require('roundtrip-dep'); if (!d.ok || d.version !== '1.0.0') process.exit(1);"],
             run_env,
         )
         cli_bin = proj / "node_modules" / ".bin" / "roundtrip-cli"
