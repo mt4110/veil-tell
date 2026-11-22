@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "timeout_seconds": 3,
+  "destination": {"host": "allowed.test", "port": 443},
+  "verdict": "fails",
+  "reason": "denied_command_succeeded",
+  "exit_code": 1,
+  "phase": "complete",
+  "trials": {
+    "allowed": {
+      "schema_version": 1,
+      "backend": "isolated",
+      "mode": "restrict",
+      "isolation": "applied",
+      "coverage": {
+        "proxy": "http_connect_requests",
+        "direct_attempt_destinations": "not_observed",
+        "dns_attempts": "node_dns_lookup_hook",
+        "proxy_capture": "while_running"
+      },
+      "child_status": {"exit_code": 0, "signal": null},
+      "run_status": {"exit_code": 0, "reason": "completed"},
+      "destinations": [],
+      "attempted": []
+    },
+    "denied": {
+      "schema_version": 1,
+      "backend": "isolated",
+      "mode": "restrict",
+      "isolation": "applied",
+      "coverage": {
+        "proxy": "http_connect_requests",
+        "direct_attempt_destinations": "not_observed",
+        "dns_attempts": "node_dns_lookup_hook",
+        "proxy_capture": "while_running"
+      },
+      "child_status": {"exit_code": 0, "signal": null},
+      "run_status": {"exit_code": 0, "reason": "completed"},
+      "destinations": [],
+      "attempted": []
+    },
+    "restored": {
+      "schema_version": 1,
+      "backend": "isolated",
+      "mode": "restrict",
+      "isolation": "applied",
+      "coverage": {
+        "proxy": "http_connect_requests",
+        "direct_attempt_destinations": "not_observed",
+        "dns_attempts": "node_dns_lookup_hook",
+        "proxy_capture": "while_running"
+      },
+      "child_status": {"exit_code": 0, "signal": null},
+      "run_status": {"exit_code": 0, "reason": "completed"},
+      "destinations": [],
+      "attempted": []
+    }
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "backend": "isolated",
+  "mode": "observe",
+  "isolation": "applied",
+  "coverage": {
+    "proxy": "http_connect_requests",
+    "direct_attempt_destinations": "ip_port",
+    "dns_attempts": "node_dns_lookup_hook",
+    "proxy_capture": "while_running"
+  },
+  "direct_attempts": [],
+  "child_status": {"exit_code": 1, "signal": null},
+  "run_status": {"exit_code": 21, "reason": "new_destination"},
+  "destinations": [
+    {
+      "host": "new.example.invalid",
+      "port": 443,
+      "decision": "deny",
+      "reason": "new_destination",
+      "result": "blocked",
+      "connected_ip": null,
+      "attempts": 1,
+      "sent_bytes": 0,
+      "max_connection_bytes": 0,
+      "received_bytes": 0,
+      "attribution": [
+        {
+          "confidence": "inferred",
+          "package": {
+            "name": "fixture-pkg",
+            "version": "1.2.3",
+            "script": "postinstall",
+            "path": "node_modules/fixture-pkg"
+          }
+        }
+      ]
+    }
+  ],
+  "attempted": [],
+  "comparison": {
+    "status": "new_destinations_only",
+    "backend_changed": false,
+    "added": [
+      {
+        "host": "new.example.invalid",
+        "port": 443,
+        "attempts": 1,
+        "attribution": [
+          {
+            "confidence": "inferred",
+            "package": {
+              "name": "fixture-pkg",
+              "version": "1.2.3",
+              "script": "postinstall",
+              "path": "node_modules/fixture-pkg"
+            }
+          }
+        ]
+      }
+    ],
+    "removed": [],
+    "count_changes": []
+  }
+}

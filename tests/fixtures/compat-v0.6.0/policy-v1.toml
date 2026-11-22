@@ -1,0 +1,13 @@
+version = 1
+profile = "compat-v0.6.0"
+
+[[rule]]
+host = "registry.npmjs.org"
+port = 443
+action = "allow"
+max_sent_bytes = 262144
+
+[[rule]]
+host = "telemetry.example.invalid"
+port = 443
+action = "deny"

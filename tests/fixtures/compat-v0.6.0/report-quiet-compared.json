@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "backend": "isolated",
+  "mode": "observe",
+  "isolation": "applied",
+  "coverage": {
+    "proxy": "http_connect_requests",
+    "direct_attempt_destinations": "ip_port",
+    "dns_attempts": "node_dns_lookup_hook",
+    "proxy_capture": "while_running"
+  },
+  "direct_attempts": [],
+  "child_status": {"exit_code": 0, "signal": null},
+  "run_status": {"exit_code": 0, "reason": "completed"},
+  "destinations": [
+    {
+      "host": "registry.npmjs.org",
+      "port": 443,
+      "decision": "allow",
+      "reason": "observe",
+      "result": "connected",
+      "connected_ip": "104.16.0.1",
+      "attempts": 2,
+      "sent_bytes": 1024,
+      "max_connection_bytes": 768,
+      "received_bytes": 4096
+    }
+  ],
+  "attempted": [],
+  "comparison": {
+    "status": "compared",
+    "backend_changed": false,
+    "added": [],
+    "removed": [],
+    "count_changes": []
+  }
+}

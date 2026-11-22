@@ -1,0 +1,22 @@
+{
+  "captured_from_version": "0.6.0",
+  "captured_from_tag": "v0.6.0",
+  "captured_from_commit": "d3dd8d2e397a87e340da23393031925c0336b6f9",
+  "notes": "C01 compatibility fixtures frozen from veil-tell v0.6.0 per docs/roadmap-to-1.0.md section 8.",
+  "fixtures": {
+    "baseline-minimal.json": {"expected_exit": 0, "expected_comparison_status": "compared"},
+    "baseline-full.json": {"expected_exit": 0, "expected_comparison_status": "compared"},
+    "baseline-invalid-unknown-version.json": {"expected_exit": 125},
+    "baseline-invalid-unknown-field.json": {"expected_exit": 125},
+    "policy-v1.toml": {"expected_exit": 0},
+    "report-quiet-compared.json": {"should_comment": false, "has_findings": false, "reasons": []},
+    "report-new-destination.json": {"should_comment": true, "has_findings": true, "reasons": ["new", "blocked"]},
+    "report-volume-cut.json": {"should_comment": false, "has_findings": true, "reasons": ["volume_cut"]},
+    "report-child-failed-21.json": {"should_comment": false, "has_findings": false, "reasons": []},
+    "report-incomplete-capture.json": {"should_comment": false, "has_findings": true, "reasons": ["blocked"]},
+    "verify-passes.json": {"verdict": "passes", "exit_code": 0},
+    "verify-fails.json": {"verdict": "fails", "exit_code": 1},
+    "verify-inconclusive.json": {"verdict": "inconclusive", "exit_code": 2},
+    "agent-log-v0.6.0.jsonl": {"expected_records": 2}
+  }
+}

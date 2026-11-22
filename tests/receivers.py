@@ -368,7 +368,7 @@ def volume_test(cli, fixture, project, evidence, node_root):
                 assert not result.get("volume_anomalies"), result
             if name == "install-ci":
                 summary = action_summary(report)
-                assert "<code>Volume anomaly</code>" in summary and "bytes 131072/262144" in summary
+                assert "Volume limit cut" in summary and "bytes 131072/262144" in summary
                 assert "veil-volume-fixture@1.2.3" in summary and "切断" in summary
             print(f"receiver case=volume-{name} os={sys.platform} bytes={expected} child=0 exit={code}")
 

@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "coverage": "http_connect_requests",
+  "backend": "proxy",
+  "destinations": [],
+  "unexpected_future_field": true
+}

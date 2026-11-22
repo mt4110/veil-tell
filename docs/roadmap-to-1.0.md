@@ -314,7 +314,7 @@ next: "比較の基準、実行 JSON、表示の期待値を照合"
 - **各版の出口**。0.6 系列は A02 と M02、0.7 は D02 と D03、0.8 は E02 の証拠を日英 README と runbook に反映する。対応を見送った環境・既知の制約・性能計測の前提も記載する。これらは目標の達成条件であり、すでに配布した v0.6.0 のタグを書き換える理由にはしない。
 - **1.0 の公開**。M02 と C02 の証拠をメンテナーに渡し、対象コミットと公開 API の対応表を合意する。公開承認後、同一コミットの CI、署名タグ、3対象の配布物と SHA-256/来歴、クリーンな利用側からの install・起動・0/21/22/125 と理由を照合する。1.x の Action 別名を提供するなら `v1` と固定タグ/対象 SHA の一致を別途検証する。`v0` は 0.x 利用者の参照として扱う。問題があれば固定版への復帰手順と修正版を案内し、公開済みの固定タグ・配布物を差し替えない。[配布手順](runbook.md) · [リリース workflow](../.github/workflows/release-build.yml)
 
-A01（Action・要約器・npm テンプレート・`tests/action_summary.py`）、M01（`scripts/monthly_rollup.py`・`tests/monthly_rollup.py`）、P01（`src/lockfile.rs` の境界試験・`tests/package_managers.py` の通常→隔離→通常往復および拒否前後再利用試験、macOS arm64 上の npm 11.19.1 / pnpm 12.4.2 実機合格）をローカル実装・検証済み。hosted CI 上での Linux（x86_64 / aarch64）マトリクス実行および `@v0` 解決実測を経て各タスク完了とし、続いて `M02`（運用対象での有効化）・`P02`（Yarn/Bun/Cargo 展開）・`A02`（マネージャー別テンプレート）・`C01`（互換 fixture 採取）へ進む。実測値と運用期間は各タスクを実行した時点で記録する。
+A01（Action・要約器・npm テンプレート・`tests/action_summary.py`）、M01（`scripts/monthly_rollup.py`・`tests/monthly_rollup.py`）、P01（`src/lockfile.rs` の npm/pnpm 境界試験・`tests/package_managers.py` の通常→隔離→通常往復および拒否前後再利用試験、macOS arm64 上の npm 11.19.1 / pnpm 12.4.2 実機合格）、P02（Yarn 両系・Bun・Cargo lockfile 境界試験、Cargo macOS 実機往復試験合格、Yarn node_modules/PnP・Bun 往復試験組み込み）、C01（`tests/fixtures/compat-v0.6.0/` 採取・`tests/contract_compat.py` 合格）をローカル実装・検証済み。hosted CI（PR #12）上での Linux（x86_64 / aarch64）および macOS マトリクス実測を経て A01/M01/P01/P02/C01 の完了を確定し、続いて `M02`（運用対象での有効化）・`A02`（マネージャー別テンプレート）・`C02`（契約凍結）へ進む。実測値と運用期間は各タスクを実行した時点で記録する。
 
 ## 10. やらないこと・止められないこと・1.0 の先
 

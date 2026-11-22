@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "coverage": "http_connect_requests",
+  "backend": "isolated",
+  "lockfile": {
+    "ecosystem": "npm",
+    "packages": [
+      {
+        "name": "fixture-pkg",
+        "version": "1.2.3",
+        "integrity": "sha512-fixture=="
+      }
+    ]
+  },
+  "destinations": [
+    {
+      "host": "registry.npmjs.org",
+      "port": 443,
+      "attempts": 2,
+      "attribution": [
+        {
+          "confidence": "unknown"
+        }
+      ]
+    }
+  ],
+  "attempted": [
+    {
+      "host": "telemetry.example.invalid",
+      "attempts": 1,
+      "attribution": [
+        {
+          "confidence": "inferred",
+          "package": {
+            "name": "fixture-pkg",
+            "version": "1.2.3",
+            "script": "postinstall",
+            "path": "node_modules/fixture-pkg"
+          }
+        }
+      ]
+    }
+  ],
+  "volume": {
+    "registry.npmjs.org": {
+      "sent_bytes": 1024,
+      "connections": 2,
+      "max_connection_bytes": 768
+    }
+  }
+}

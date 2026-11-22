@@ -159,10 +159,11 @@ def write_tarball_package(target_tgz):
             tar.addfile(info, io.BytesIO(data))
 
 
-def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_env, version):
-    roundtrip_root = workspace / "roundtrip-interoperability"
+def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_env, version, yarn_pnp=False):
+    variant_tag = f"{manager}-pnp" if yarn_pnp else manager
+    roundtrip_root = workspace / f"roundtrip-interoperability-{variant_tag}"
     roundtrip_root.mkdir()
-    home = workspace / "roundtrip-home"
+    home = workspace / f"roundtrip-home-{variant_tag}"
     home.mkdir()
     env = dict(base_env, HOME=str(home), XDG_DATA_HOME=str(home / "data"), XDG_CACHE_HOME=str(home / "cache"))
     env.pop("CI", None)
@@ -191,10 +192,11 @@ def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_en
             local_env["PATH"] = f"{local_tool.parent}:{os.environ['PATH']}"
         if manager == "npm":
             (proj / ".npmrc").write_text("audit=false\nfund=false\n")
+            lock_name = "package-lock.json"
             lock_cmd = [local_tool, "install", "--package-lock-only", "--offline", "--no-audit", "--no-fund"]
             frozen_cmd = [local_tool, "ci", "--offline", "--no-audit", "--no-fund"]
             tracked = ("package.json", "package-lock.json", ".npmrc")
-        else:
+        elif manager == "pnpm":
             (proj / "pnpm-workspace.yaml").write_text(
                 "packages:\n  - '.'\nstoreDir: .pnpm-store\nupdateNotifier: false\n"
             )
@@ -202,46 +204,80 @@ def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_en
             if version.startswith("9."):
                 npmrc += "store-dir=.pnpm-store\n"
             (proj / ".npmrc").write_text(npmrc)
+            lock_name = "pnpm-lock.yaml"
             lock_cmd = [local_tool, "install", "--lockfile-only", "--offline"]
             frozen_cmd = [local_tool, "install", "--frozen-lockfile", "--offline"]
             tracked = ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
-        return proj, local_tool, local_env, lock_cmd, frozen_cmd, tracked
+        elif manager == "yarn" and version.startswith("1."):
+            lock_name = "yarn.lock"
+            lock_cmd = [local_tool, "install", "--offline"]
+            frozen_cmd = [local_tool, "install", "--frozen-lockfile", "--offline"]
+            tracked = ("package.json", "yarn.lock")
+        elif manager == "yarn":
+            linker = "pnp" if yarn_pnp else "node-modules"
+            (proj / ".yarnrc.yml").write_text(
+                f"enableNetwork: false\nenableScripts: true\nenableGlobalCache: false\n"
+                f"enableImmutableInstalls: false\nnodeLinker: {linker}\n"
+            )
+            lock_name = "yarn.lock"
+            lock_cmd = [local_tool, "install"]
+            frozen_cmd = [local_tool, "install", "--immutable"]
+            tracked = ("package.json", "yarn.lock", ".yarnrc.yml")
+        elif manager == "bun":
+            lock_name = "bun.lock"
+            lock_cmd = [local_tool, "install"]
+            frozen_cmd = [local_tool, "install", "--frozen-lockfile"]
+            tracked = ("package.json", "bun.lock")
+        else:
+            raise ValueError(f"unsupported manager: {manager}")
+        return proj, local_tool, local_env, lock_name, lock_cmd, frozen_cmd, tracked
 
     def run_in(proj, args, run_env, expected=0):
         res = subprocess.run(args, cwd=proj, env=run_env, text=True, capture_output=True, timeout=30)
         assert res.returncode == expected, (args, res.stdout, res.stderr)
         return res
 
-    def verify_installed_dependency(proj, run_env):
-        req = run_in(
+    def verify_installed_dependency(proj, local_tool, run_env):
+        if yarn_pnp:
+            run_in(
+                proj,
+                [local_tool, "node", "-e", "const d = require('roundtrip-dep'); if (!d.ok || d.version !== '1.0.0') process.exit(1);"],
+                run_env,
+            )
+            out = run_in(proj, [local_tool, "roundtrip-cli"], run_env)
+            assert "roundtrip-ok" in out.stdout, out.stdout
+            return
+        js_runner = local_tool if manager == "bun" else "node"
+        run_in(
             proj,
-            ["node", "-e", "const d = require('roundtrip-dep'); if (!d.ok || d.version !== '1.0.0') process.exit(1);"],
+            [js_runner, "-e", "const d = require('roundtrip-dep'); if (!d.ok || d.version !== '1.0.0') process.exit(1);"],
             run_env,
         )
-        assert req.returncode == 0
         cli_bin = proj / "node_modules" / ".bin" / "roundtrip-cli"
         out = run_in(proj, [cli_bin], run_env)
         assert out.stdout.strip() == "roundtrip-ok", out.stdout
 
     # Generate a real lockfile cleanly first, then copy locked inputs to control and roundtrip projects.
-    seed, _, seed_env, seed_lock_cmd, _, seed_tracked = prepare_project("seed")
+    seed, _, seed_env, lock_name, seed_lock_cmd, _, _ = prepare_project("seed")
     run_in(seed, seed_lock_cmd, seed_env)
 
-    control, control_tool, control_env, _, control_cmd, tracked = prepare_project("control")
-    roundtrip, rt_tool, rt_env, _, rt_cmd, _ = prepare_project("roundtrip")
-    lock_name = "package-lock.json" if manager == "npm" else "pnpm-lock.yaml"
+    control, control_tool, control_env, _, _, control_cmd, tracked = prepare_project("control")
+    roundtrip, rt_tool, rt_env, _, _, rt_cmd, _ = prepare_project("roundtrip")
     lock_bytes = (seed / lock_name).read_bytes()
     (control / lock_name).write_bytes(lock_bytes)
     (roundtrip / lock_name).write_bytes(lock_bytes)
+    if manager == "yarn" and not version.startswith("1.") and (seed / ".yarn").exists():
+        for dst in (control / ".yarn", roundtrip / ".yarn"):
+            shutil.copytree(seed / ".yarn", dst, symlinks=True)
 
     # Control: plain frozen install + verify dependency execution
     run_in(control, control_cmd, control_env)
-    verify_installed_dependency(control, control_env)
+    verify_installed_dependency(control, control_tool, control_env)
     expected_files = {rel: (control / rel).read_bytes() for rel in tracked}
 
     # Roundtrip Step 1: plain frozen install + execute dependency
     run_in(roundtrip, rt_cmd, rt_env)
-    verify_installed_dependency(roundtrip, rt_env)
+    verify_installed_dependency(roundtrip, rt_tool, rt_env)
 
     # Roundtrip Step 2: isolated warm cache (initial baseline save + CI compare)
     run_in(roundtrip, [cli, *rt_cmd], rt_env)
@@ -252,17 +288,19 @@ def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_en
     warm_ci = run_in(roundtrip, [cli, "ci", "--json", "--", *rt_cmd], rt_env)
     assert json.loads(warm_ci.stdout)["comparison"]["status"] == "compared"
 
-    # Roundtrip Step 3: isolated cold cache (remove node_modules and local store)
-    for cache_rel in ("node_modules", ".pnpm-store"):
+    # Roundtrip Step 3: isolated cold cache (remove installed outputs / store)
+    for cache_rel in ("node_modules", ".pnpm-store", ".pnp.cjs", ".pnp.loader.mjs", ".yarn/unplugged"):
         cache_path = roundtrip / cache_rel
-        if cache_path.exists():
+        if cache_path.is_dir():
             shutil.rmtree(cache_path)
+        elif cache_path.exists():
+            cache_path.unlink()
     cold_ci = run_in(roundtrip, [cli, "ci", "--json", "--", *rt_cmd], rt_env)
     assert json.loads(cold_ci.stdout)["comparison"]["status"] == "compared"
 
     # Roundtrip Step 4: plain frozen install again after isolation (native -> isolated -> native)
     run_in(roundtrip, rt_cmd, rt_env)
-    verify_installed_dependency(roundtrip, rt_env)
+    verify_installed_dependency(roundtrip, rt_tool, rt_env)
 
     # Verify config/lock invariants match control byte-for-byte
     for rel in tracked:
@@ -281,10 +319,89 @@ def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_en
         assert str(native_store) in modules_yaml, modules_yaml
 
     print(
-        f"{sys.platform} {manager} {version} roundtrip=native->isolated(warm+cold)->native "
+        f"{sys.platform} {variant_tag} {version} roundtrip=native->isolated(warm+cold)->native "
         "invariants=matched dependency_exec=ok",
         flush=True,
     )
+
+
+def test_cargo_roundtrip(cli, cargo_tool):
+    with tempfile.TemporaryDirectory(prefix="veil-pm-cargo-") as folder:
+        root = Path(folder).resolve()
+        env = dict(os.environ, PATH=f"{cargo_tool.parent}:{os.environ['PATH']}")
+        env.pop("CI", None)
+        version = subprocess.check_output([cargo_tool, "-V"], env=env, text=True).strip()
+
+        def prepare_cargo_workspace(name):
+            ws = root / name
+            dep = ws / "dep"
+            app = ws / "app"
+            (dep / "src").mkdir(parents=True)
+            (app / "src").mkdir(parents=True)
+            (dep / "Cargo.toml").write_text(
+                '[package]\nname = "roundtrip-dep"\nversion = "0.1.0"\nedition = "2024"\n'
+            )
+            (dep / "src" / "lib.rs").write_text(
+                'pub fn greeting() -> &\'static str { "cargo-roundtrip-ok" }\n'
+            )
+            (app / "Cargo.toml").write_text(
+                '[package]\nname = "roundtrip-app"\nversion = "0.1.0"\nedition = "2024"\n'
+                '[dependencies]\nroundtrip-dep = { path = "../dep" }\n'
+            )
+            (app / "build.rs").write_text('fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n')
+            (app / "src" / "main.rs").write_text(
+                'fn main() { println!("{}", roundtrip_dep::greeting()); }\n'
+            )
+            return ws, app
+
+        def run_in(cwd, args, expected=0):
+            res = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, timeout=60)
+            assert res.returncode == expected, (args, res.stdout, res.stderr)
+            return res
+
+        _, seed_app = prepare_cargo_workspace("seed")
+        run_in(seed_app, [cargo_tool, "generate-lockfile", "--offline"])
+        lock_bytes = (seed_app / "Cargo.lock").read_bytes()
+
+        _, ctrl_app = prepare_cargo_workspace("control")
+        (ctrl_app / "Cargo.lock").write_bytes(lock_bytes)
+        run_in(ctrl_app, [cargo_tool, "build", "--locked", "--offline"])
+        assert run_in(ctrl_app, [ctrl_app / "target" / "debug" / "roundtrip-app"]).stdout.strip() == "cargo-roundtrip-ok"
+        tracked = ("Cargo.toml", "Cargo.lock", "build.rs")
+        expected_files = {rel: (ctrl_app / rel).read_bytes() for rel in tracked}
+
+        _, rt_app = prepare_cargo_workspace("roundtrip")
+        (rt_app / "Cargo.lock").write_bytes(lock_bytes)
+        build_cmd = ["cargo", "build", "--locked", "--offline"]
+
+        # Step 1: plain cargo build + run
+        run_in(rt_app, build_cmd)
+        assert run_in(rt_app, [rt_app / "target" / "debug" / "roundtrip-app"]).stdout.strip() == "cargo-roundtrip-ok"
+
+        # Step 2: isolated warm build (save baseline + CI compare)
+        run_in(rt_app, [cli, *build_cmd])
+        baseline = json.loads((rt_app / ".veil-tell" / "cargo.json").read_text())
+        assert baseline["backend"] == "isolated"
+        assert baseline["lockfile"]["ecosystem"] == "cargo"
+        warm_ci = run_in(rt_app, [cli, "ci", "--json", "--", *build_cmd])
+        assert json.loads(warm_ci.stdout)["comparison"]["status"] == "compared"
+
+        # Step 3: isolated cold build (remove target)
+        shutil.rmtree(rt_app / "target")
+        cold_ci = run_in(rt_app, [cli, "ci", "--json", "--", *build_cmd])
+        assert json.loads(cold_ci.stdout)["comparison"]["status"] == "compared"
+
+        # Step 4: plain cargo build again + run built binary
+        run_in(rt_app, build_cmd)
+        assert run_in(rt_app, [rt_app / "target" / "debug" / "roundtrip-app"]).stdout.strip() == "cargo-roundtrip-ok"
+        for rel in tracked:
+            assert (rt_app / rel).read_bytes() == expected_files[rel], f"{rel} changed during roundtrip"
+
+        print(
+            f"{sys.platform} cargo ({version}) roundtrip=native->isolated(warm+cold)->native "
+            "invariants=matched binary_exec=ok",
+            flush=True,
+        )
 
 
 def test_manager(cli, tool, manager):
@@ -304,8 +421,10 @@ def test_manager(cli, tool, manager):
             env["PATH"] = f"{runtime_tool.parent}:{os.environ['PATH']}"
         if manager == "pnpm":
             test_pnpm_store(cli, runtime_tool, project, env, version)
-        if manager in ("npm", "pnpm"):
+        if manager in ("npm", "pnpm", "yarn", "bun"):
             test_native_isolated_native_roundtrip(cli, tool, manager, project, env, version)
+            if manager == "yarn" and not version.startswith("1."):
+                test_native_isolated_native_roundtrip(cli, tool, manager, project, env, version, yarn_pnp=True)
         package = {"name": "fixture", "private": True, "version": "1.0.0"}
         if manager == "bun":
             package["trustedDependencies"] = ["probe"]
@@ -570,5 +689,7 @@ if __name__ == "__main__":
         test_corepack(cli, corepack, standalone, node)
         test_install_home_and_accept(cli, npm, node)
     for name, path in tools:
-        if name not in ("corepack", "node", "standalone"):
+        if name == "cargo":
+            test_cargo_roundtrip(cli, path)
+        elif name not in ("corepack", "node", "standalone"):
             test_manager(cli, path, name)

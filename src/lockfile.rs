@@ -525,4 +525,134 @@ mod tests {
         assert_eq!(self::pnpm(&pnpm_v9).unwrap().len(), 2);
         assert!(self::pnpm(&pnpm_v6).is_none());
     }
+
+    #[test]
+    fn validates_yarn_bun_and_cargo_lock_evidence_boundaries() {
+        let pkg_v1 = Package {
+            name: "demo".into(),
+            version: "1.0.0".into(),
+            script: "postinstall".into(),
+            path: "node_modules/demo".into(),
+        };
+        let pkg_v2 = Package {
+            version: "1.0.1".into(),
+            ..pkg_v1.clone()
+        };
+
+        // Yarn Berry (checksum change & workspace exclusion)
+        let berry_base = Summary {
+            ecosystem: Ecosystem::Yarn,
+            packages: yarn(
+                "__metadata:\n  version: 8\n\"app@workspace:.\":\n  version: 0.0.0-use.local\n  resolution: \"app@workspace:.\"\n\"demo@npm:^1\":\n  version: 1.0.0\n  resolution: \"demo@npm:1.0.0\"\n  checksum: sha512-v1\n",
+            )
+            .unwrap(),
+        };
+        assert_eq!(berry_base.packages.len(), 1);
+        let berry_tampered = Summary {
+            ecosystem: Ecosystem::Yarn,
+            packages: yarn(
+                "__metadata:\n  version: 8\n\"demo@npm:^1\":\n  version: 1.0.0\n  resolution: \"demo@npm:1.0.0\"\n  checksum: sha512-evil\n",
+            )
+            .unwrap(),
+        };
+        let berry_diff = berry_base.compare(&berry_tampered).unwrap();
+        let berry_ev = berry_diff.label(Some(&pkg_v1), &berry_tampered).unwrap();
+        assert!(berry_ev.label.contains("1.0.0 integrity changed"));
+
+        // Yarn Classic (v1 format vs invalid header)
+        let classic_base = Summary {
+            ecosystem: Ecosystem::Yarn,
+            packages: yarn(
+                "# yarn lockfile v1\n\ndemo@^1.0.0:\n  version \"1.0.0\"\n  integrity sha512-v1\n",
+            )
+            .unwrap(),
+        };
+        let classic_upd = Summary {
+            ecosystem: Ecosystem::Yarn,
+            packages: yarn(
+                "# yarn lockfile v1\n\ndemo@^1.0.0:\n  version \"1.0.1\"\n  integrity sha512-v2\n",
+            )
+            .unwrap(),
+        };
+        let classic_ev = classic_base
+            .compare(&classic_upd)
+            .unwrap()
+            .label(Some(&pkg_v2), &classic_upd)
+            .unwrap();
+        assert!(classic_ev.label.contains("1.0.0→1.0.1"));
+        assert!(yarn("not a yarn lockfile\n").is_none());
+
+        // Bun (v1/v2 vs unsupported binary/v0)
+        let bun_v1 = json5::from_str(
+            r#"{lockfileVersion:1,packages:{"demo":["demo@1.0.0","",{},"sha512-v1"],},}"#,
+        )
+        .unwrap();
+        let bun_v2_tampered = json5::from_str(
+            r#"{lockfileVersion:2,packages:{"demo":["demo@1.0.0","",{},"sha512-tampered"],},}"#,
+        )
+        .unwrap();
+        let bun_v0 = json5::from_str(r#"{lockfileVersion:0,packages:{}}"#).unwrap();
+        assert!(self::bun(&bun_v0).is_none());
+        let bun_base = Summary {
+            ecosystem: Ecosystem::Bun,
+            packages: self::bun(&bun_v1).unwrap(),
+        };
+        let bun_curr = Summary {
+            ecosystem: Ecosystem::Bun,
+            packages: self::bun(&bun_v2_tampered).unwrap(),
+        };
+        assert!(
+            bun_base
+                .compare(&bun_curr)
+                .unwrap()
+                .label(Some(&pkg_v1), &bun_curr)
+                .unwrap()
+                .label
+                .contains("1.0.0 integrity changed")
+        );
+
+        // Cargo (v3/v4, multiple versions, checksum change, unsupported v2)
+        let cargo_v3 = cargo(
+            "version = 3\n[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nchecksum = \"abc\"\n",
+        )
+        .unwrap();
+        let cargo_v4_multi = cargo(
+            "version = 4\n[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nchecksum = \"abc\"\n[[package]]\nname = \"demo\"\nversion = \"2.0.0\"\nchecksum = \"def\"\n",
+        )
+        .unwrap();
+        let cargo_v4_tampered = cargo(
+            "version = 4\n[[package]]\nname = \"demo\"\nversion = \"1.0.0\"\nchecksum = \"evil\"\n",
+        )
+        .unwrap();
+        assert!(cargo("version = 2\n").is_none());
+
+        let cargo_base = Summary {
+            ecosystem: Ecosystem::Cargo,
+            packages: cargo_v3,
+        };
+        let cargo_multi = Summary {
+            ecosystem: Ecosystem::Cargo,
+            packages: cargo_v4_multi,
+        };
+        let cargo_tampered = Summary {
+            ecosystem: Ecosystem::Cargo,
+            packages: cargo_v4_tampered,
+        };
+        let cargo_pkg = Package {
+            name: "demo".into(),
+            version: "1.0.0".into(),
+            script: "build.rs".into(),
+            path: "demo".into(),
+        };
+        assert!(
+            cargo_base
+                .compare(&cargo_tampered)
+                .unwrap()
+                .label(Some(&cargo_pkg), &cargo_tampered)
+                .unwrap()
+                .label
+                .contains("1.0.0 integrity changed")
+        );
+        assert_eq!(cargo_multi.packages.len(), 2);
+    }
 }

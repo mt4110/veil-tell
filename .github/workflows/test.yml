@@ -47,6 +47,7 @@ jobs:
       - run: python3 -B tests/verify.py target/debug/veil-tell target/debug/examples/receiver_cli
       - run: python3 -B tests/action_summary.py target/debug/veil-tell
       - run: python3 -B tests/monthly_rollup.py
+      - run: python3 -B tests/contract_compat.py target/debug/veil-tell
       - name: Dependency manager lifecycle fixtures
         shell: bash
         run: |
@@ -79,6 +80,7 @@ jobs:
             trials+=("$manager=$runtime/$variant/$manager")
           done
           python3 -B tests/package_managers.py target/debug/veil-tell "${trials[@]}" \
+            "cargo=$(command -v cargo)" \
             "corepack=$runtime/node_modules/corepack/dist/corepack.js" \
             "node=$runtime/bin/node" "standalone=$runtime/node_modules/@pnpm/$pnpm_package/pnpm"
       - run: python3 -B experiments/dns-attempts/probe.py
