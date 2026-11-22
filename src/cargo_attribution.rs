@@ -92,15 +92,17 @@ fn rustup_binary(entry: &Path, resolved: &Path, _cwd: &Path, _path_env: &OsStr) 
     if resolved.file_name() == Some(OsStr::new("rustup")) {
         return Some(resolved.to_path_buf());
     }
+    let entry_meta = entry.metadata().ok()?;
+    let resolved_meta = resolved.metadata().ok()?;
     let entry_dir = entry.parent()?;
     let resolved_dir = resolved.parent()?;
     for dir in [entry_dir, resolved_dir] {
         let sibling = dir.join("rustup");
-        let has_rustc = dir.join("rustc").is_file();
-        if !has_rustc
-            && let Ok(meta) = sibling.metadata()
+        if let Ok(meta) = sibling.metadata()
             && meta.is_file()
             && meta.mode() & 0o111 != 0
+            && ((meta.dev() == entry_meta.dev() && meta.ino() == entry_meta.ino())
+                || (meta.dev() == resolved_meta.dev() && meta.ino() == resolved_meta.ino()))
         {
             return Some(sibling);
         }
@@ -280,7 +282,9 @@ mod tests {
         .unwrap();
         fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
         let shim_cargo = shim_bin.join("cargo");
+        let shim_rustc = shim_bin.join("rustc");
         fs::hard_link(&rustup, &shim_cargo).unwrap();
+        fs::hard_link(&rustup, &shim_rustc).unwrap();
 
         let resolved = Toolchain::resolve_with_path(
             &[OsString::from("cargo")],

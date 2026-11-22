@@ -132,7 +132,12 @@ pub async fn prepare(
             launch.args(["--ro-bind", dir, dir]);
         }
     }
-    for file in ["/etc/ssl/certs", "/etc/pki", "/etc/ld.so.cache"] {
+    for file in [
+        "/etc/ssl/certs",
+        "/etc/pki",
+        "/etc/ld.so.cache",
+        "/etc/alternatives",
+    ] {
         if Path::new(file).exists() {
             launch.args(["--ro-bind", file, file]);
         }
