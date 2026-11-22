@@ -405,4 +405,124 @@ mod tests {
             assert_eq!(parsed.unwrap(), expected);
         }
     }
+
+    #[test]
+    fn validates_npm_and_pnpm_lock_evidence_boundaries() {
+        let npm_v2 = serde_json::json!({
+            "lockfileVersion": 2,
+            "packages": {
+                "": {"name": "app", "version": "1.0.0"},
+                "node_modules/linked": {"link": true, "version": "1.0.0"},
+                "node_modules/demo": {"version": "1.0.0", "integrity": "sha512-v1"}
+            }
+        });
+        let npm_v3_updated = serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"name": "app", "version": "1.0.0"},
+                "node_modules/demo": {"version": "1.0.1", "integrity": "sha512-v2"}
+            }
+        });
+        let npm_v3_tampered = serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"name": "app", "version": "1.0.0"},
+                "node_modules/demo": {"version": "1.0.0", "integrity": "sha512-tampered"}
+            }
+        });
+        let npm_v3_missing = serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {"": {"name": "app", "version": "1.0.0"}}
+        });
+        let npm_v3_multi = serde_json::json!({
+            "lockfileVersion": 3,
+            "packages": {
+                "": {"name": "app", "version": "1.0.0"},
+                "node_modules/demo": {"version": "1.0.0", "integrity": "sha512-v1"},
+                "node_modules/other/node_modules/demo": {"version": "2.0.0", "integrity": "sha512-v2"}
+            }
+        });
+        let npm_v1_invalid = serde_json::json!({"lockfileVersion": 1, "dependencies": {}});
+
+        let base = Summary {
+            ecosystem: Ecosystem::Npm,
+            packages: npm(&npm_v2).unwrap(),
+        };
+        assert_eq!(base.packages.len(), 1);
+        assert!(npm(&npm_v1_invalid).is_none());
+
+        let pkg_v2 = Package {
+            name: "demo".into(),
+            version: "1.0.1".into(),
+            script: "postinstall".into(),
+            path: "node_modules/demo".into(),
+        };
+        let pkg_v1 = Package {
+            version: "1.0.0".into(),
+            ..pkg_v2.clone()
+        };
+
+        // 1. Normal version update
+        let updated = Summary {
+            ecosystem: Ecosystem::Npm,
+            packages: npm(&npm_v3_updated).unwrap(),
+        };
+        let diff_upd = base.compare(&updated).unwrap();
+        let ev_upd = diff_upd.label(Some(&pkg_v2), &updated).unwrap();
+        assert_eq!(ev_upd.status, "corroborated");
+        assert!(ev_upd.label.contains("1.0.0→1.0.1"), "{}", ev_upd.label);
+
+        // 2. Same version, changed integrity digest
+        let tampered = Summary {
+            ecosystem: Ecosystem::Npm,
+            packages: npm(&npm_v3_tampered).unwrap(),
+        };
+        let diff_tamper = base.compare(&tampered).unwrap();
+        let ev_tamper = diff_tamper.label(Some(&pkg_v1), &tampered).unwrap();
+        assert_eq!(ev_tamper.status, "corroborated");
+        assert!(ev_tamper.label.contains("1.0.0 integrity changed"), "{}", ev_tamper.label);
+
+        // 3. Missing package in current lockfile -> None
+        let missing = Summary {
+            ecosystem: Ecosystem::Npm,
+            packages: npm(&npm_v3_missing).unwrap(),
+        };
+        let diff_missing = base.compare(&missing).unwrap();
+        assert!(diff_missing.label(Some(&pkg_v1), &missing).is_none());
+
+        // 4. Multiple versions of the same package (e.g. demo@1.0.0 and demo@2.0.0) -> None (ambiguous)
+        let multi = Summary {
+            ecosystem: Ecosystem::Npm,
+            packages: npm(&npm_v3_multi).unwrap(),
+        };
+        assert_eq!(multi.packages.len(), 2);
+        let diff_multi = base.compare(&multi).unwrap();
+        assert!(diff_multi.label(Some(&pkg_v1), &multi).is_some());
+        let multi_same_ver_diff_integrity = Summary {
+            ecosystem: Ecosystem::Npm,
+            packages: BTreeSet::from([
+                Entry {
+                    name: "demo".into(),
+                    version: "1.0.0".into(),
+                    integrity: Some("sha512-a".into()),
+                },
+                Entry {
+                    name: "demo".into(),
+                    version: "1.0.0".into(),
+                    integrity: Some("sha512-b".into()),
+                },
+            ]),
+        };
+        let diff_ambig = base.compare(&multi_same_ver_diff_integrity).unwrap();
+        assert!(diff_ambig.label(Some(&pkg_v1), &multi_same_ver_diff_integrity).is_none());
+
+        // 5. pnpm v9 boundaries (valid vs unsupported v6)
+        let pnpm_v9 = serde_yaml_ng::from_str(
+            "lockfileVersion: '9.0'\npackages:\n  'demo@1.0.0':\n    resolution: { integrity: sha512-v1 }\n  'demo@2.0.0':\n    resolution: { integrity: sha512-v2 }\n",
+        )
+        .unwrap();
+        let pnpm_v6 = serde_yaml_ng::from_str("lockfileVersion: '6.0'\npackages: {}\n").unwrap();
+        assert_eq!(self::pnpm(&pnpm_v9).unwrap().len(), 2);
+        assert!(self::pnpm(&pnpm_v6).is_none());
+    }
 }

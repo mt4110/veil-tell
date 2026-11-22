@@ -1,0 +1,221 @@
+"""M01 acceptance tests for scripts/monthly_rollup.py (docs/roadmap-to-1.0.md section 5)."""
+
+import importlib.util
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+ROOT = Path(__file__).resolve().parent.parent
+ROLLUP_SCRIPT = ROOT / "scripts" / "monthly_rollup.py"
+
+
+def load_rollup():
+    spec = importlib.util.spec_from_file_location("monthly_rollup", ROLLUP_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class MonthlyRollupTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.mod = load_rollup()
+
+    def test_roadmap_acceptance_example_and_controls(self):
+        # Section 5.2 canonical acceptance example:
+        # 3 natural PRs: A (new + blocked, plus 1 rerun on same head, all 4 reasons unreviewed),
+        # B (compared, quiet), C (not run, then rerun after deadline), plus 1 synthetic PR.
+        ledger = {
+            "window_start": "2026-12-01T00:00:00Z",
+            "window_end": "2026-12-31T00:00:00Z",
+            "repositories": [
+                {
+                    "repo": "mt4110/image-drop-input",
+                    "manager": "npm",
+                    "required_jobs": ["npm-destinations"],
+                }
+            ],
+            "target_prs": [
+                {"repo": "mt4110/image-drop-input", "pr": 101, "manager": "npm", "kind": "natural", "target_heads": ["hA"]},
+                {"repo": "mt4110/image-drop-input", "pr": 102, "manager": "npm", "kind": "natural", "target_heads": ["hB"]},
+                {"repo": "mt4110/image-drop-input", "pr": 103, "manager": "npm", "kind": "natural", "target_heads": ["hC"]},
+                {"repo": "mt4110/image-drop-input", "pr": 104, "manager": "npm", "kind": "synthetic", "target_heads": ["hS"]},
+            ],
+            "runs": [
+                {
+                    "repo": "mt4110/image-drop-input", "pr": 101, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "hA", "checkout_sha": "m1",
+                    "job_matrix": "npm-destinations", "run_id": 1, "run_attempt": 1,
+                    "completed_at": "2026-12-02T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [{"kind": "new", "review": "unreviewed"}, {"kind": "blocked", "review": "unreviewed"}],
+                },
+                {
+                    "repo": "mt4110/image-drop-input", "pr": 101, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "hA", "checkout_sha": "m1",
+                    "job_matrix": "npm-destinations", "run_id": 1, "run_attempt": 2,
+                    "completed_at": "2026-12-02T01:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [{"kind": "new", "review": "unreviewed"}, {"kind": "blocked", "review": "unreviewed"}],
+                },
+                {
+                    "repo": "mt4110/image-drop-input", "pr": 102, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "hB", "checkout_sha": "m2",
+                    "job_matrix": "npm-destinations", "run_id": 2, "run_attempt": 1,
+                    "completed_at": "2026-12-03T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "none",
+                    "reasons": [],
+                },
+                {
+                    "repo": "mt4110/image-drop-input", "pr": 104, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "hS", "checkout_sha": "mS",
+                    "job_matrix": "npm-destinations", "run_id": 3, "run_attempt": 1,
+                    "completed_at": "2026-12-04T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [{"kind": "new", "review": "actionable_true_positive"}],
+                },
+                # Post-deadline rerun for PR 103 must not change primary completely_missing count
+                {
+                    "repo": "mt4110/image-drop-input", "pr": 103, "manager": "npm",
+                    "base_sha": "b2", "pr_head_sha": "hC", "checkout_sha": "m3",
+                    "job_matrix": "npm-destinations", "run_id": 4, "run_attempt": 1,
+                    "completed_at": "2027-01-01T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "none",
+                    "reasons": [],
+                },
+            ],
+        }
+        res = self.mod.rollup_ledger(ledger)
+        row = res["groups"][0]
+        self.assertEqual(row["target_prs"], 3)
+        self.assertEqual(row["prs_with_runs"], 2)
+        self.assertEqual(row["prs_fully_evaluated"], 2)
+        self.assertEqual(row["prs_completely_missing"], 1)
+        self.assertEqual(row["prs_alerted"], 1)
+        self.assertEqual(row["actual_notification_runs"], 2)
+        self.assertEqual(row["actual_notification_reruns"], 1)
+        self.assertEqual(row["prs_by_reason"]["new"], 1)
+        self.assertEqual(row["prs_by_reason"]["blocked"], 1)
+        self.assertEqual(row["prs_with_unreviewed"], 1)
+        self.assertEqual(row["runs_with_unreviewed"], 2)
+        self.assertEqual(row["displayed_reason_review"]["unreviewed"], 4)
+        self.assertIsNone(row["technical_false_positive_rate"])
+        self.assertEqual(row["non_natural_prs"], {"synthetic": 1})
+        self.assertEqual(len(row["post_deadline_runs"]), 1)
+
+    def test_display_failure_and_interrupted_run_and_base_change(self):
+        ledger = {
+            "window_start": "2026-12-01T00:00:00Z",
+            "window_end": "2026-12-31T00:00:00Z",
+            "repositories": [{"repo": "mt4110/prompt-recipe", "manager": "npm", "required_jobs": ["check"]}],
+            "target_prs": [
+                {"repo": "mt4110/prompt-recipe", "pr": 10, "manager": "npm", "kind": "natural", "target_heads": ["h10"]},
+                {"repo": "mt4110/prompt-recipe", "pr": 11, "manager": "npm", "kind": "natural", "target_heads": ["h11"]},
+            ],
+            "runs": [
+                # Control 1: JSON has blocked=1, summary failed, interrupted -> recorded=1, display_failed=1, actual_notification=0, quiet=0
+                {
+                    "repo": "mt4110/prompt-recipe", "pr": 10, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "h10", "checkout_sha": "m1",
+                    "job_matrix": "check", "run_id": 10, "run_attempt": 1,
+                    "completed_at": "2026-12-05T00:00:00Z",
+                    "status": "interrupted_with_findings", "summary_displayed": "failed",
+                    "reasons": [{"kind": "blocked", "review": "actionable_true_positive"}],
+                },
+                # Control 2: Same pr_head_sha h11, different base_sha (b1 vs b2) -> NOT a rerun!
+                {
+                    "repo": "mt4110/prompt-recipe", "pr": 11, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "h11", "checkout_sha": "m2",
+                    "job_matrix": "check", "run_id": 11, "run_attempt": 1,
+                    "completed_at": "2026-12-06T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [{"kind": "new", "review": "actionable_true_positive"}],
+                },
+                {
+                    "repo": "mt4110/prompt-recipe", "pr": 11, "manager": "npm",
+                    "base_sha": "b2", "pr_head_sha": "h11", "checkout_sha": "m3",
+                    "job_matrix": "check", "run_id": 12, "run_attempt": 1,
+                    "completed_at": "2026-12-06T01:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [{"kind": "new", "review": "false_positive"}],
+                },
+            ],
+        }
+        row = self.mod.rollup_ledger(ledger)["groups"][0]
+        self.assertEqual(row["recorded_finding_runs"], 3)
+        self.assertEqual(row["display_failed_runs"], 1)
+        self.assertEqual(row["actual_notification_runs"], 2)
+        self.assertEqual(row["actual_notification_reruns"], 0)
+        self.assertEqual(row["quiet_evaluatable_runs"], 0)
+        self.assertEqual(row["prs_fully_evaluated"], 1)
+        self.assertEqual(row["prs_completely_missing"], 1)
+        self.assertEqual(row["prs_with_false_positive"], 1)
+        self.assertAlmostEqual(row["technical_false_positive_rate"], 0.5)
+
+    def test_noise_separate_from_fp_and_zero_updates_and_cli(self):
+        ledger = {
+            "window_start": "2026-12-01T00:00:00Z",
+            "window_end": "2026-12-31T00:00:00Z",
+            "repositories": [
+                {"repo": "mt4110/quiet-repo", "manager": "cargo", "required_jobs": ["check"]},
+                {"repo": "mt4110/noise-repo", "manager": "npm", "required_jobs": ["a", "b"]},
+            ],
+            "target_prs": [
+                {"repo": "mt4110/noise-repo", "pr": 1, "manager": "npm", "kind": "natural", "target_heads": ["h1"]},
+            ],
+            "runs": [
+                {
+                    "repo": "mt4110/noise-repo", "pr": 1, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "h1", "checkout_sha": "m1",
+                    "job_matrix": "a", "run_id": 20, "run_attempt": 1,
+                    "completed_at": "2026-12-10T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [
+                        {"kind": "new", "review": "noise_valid_observation"},
+                        {"kind": "volume", "review": "actionable_true_positive"},
+                    ],
+                    "raw_log": "SECRET_PRIVATE_HOSTNAME",
+                },
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            td = Path(tmp)
+            ledger_file = td / "ledger.json"
+            out_json = td / "out.json"
+            out_md = td / "out.md"
+            ledger_file.write_text(json.dumps(ledger), encoding="utf-8")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(ROLLUP_SCRIPT),
+                    str(ledger_file),
+                    "--format",
+                    "both",
+                    "--out-json",
+                    str(out_json),
+                    "--out-md",
+                    str(out_md),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            summary = json.loads(out_json.read_text(encoding="utf-8"))
+            md_text = out_md.read_text(encoding="utf-8")
+            self.assertNotIn("SECRET_PRIVATE_HOSTNAME", out_json.read_text(encoding="utf-8"))
+            self.assertNotIn("SECRET_PRIVATE_HOSTNAME", md_text)
+            cargo_row = next(g for g in summary["groups"] if g["repo"] == "mt4110/quiet-repo")
+            npm_row = next(g for g in summary["groups"] if g["repo"] == "mt4110/noise-repo")
+            self.assertEqual(cargo_row["effectiveness_status"], "pending_zero_updates")
+            self.assertEqual(npm_row["prs_partially_evaluated"], 1)
+            self.assertEqual(npm_row["prs_with_noise"], 1)
+            self.assertEqual(npm_row["displayed_reason_review"]["false_positive"], 0)
+            self.assertEqual(npm_row["technical_false_positive_rate"], 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

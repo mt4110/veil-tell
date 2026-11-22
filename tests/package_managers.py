@@ -1,5 +1,6 @@
 """Local dependency lifecycle fixtures. Pass the executable paths to test."""
 
+import io
 import json
 import os
 from pathlib import Path
@@ -7,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 
@@ -28,7 +30,26 @@ def test_pnpm_store(cli, tool, workspace, env, version):
         env["PATH"] = f"{tool.parent}:{env['PATH']}"
     dependency = project / "fixture"
     dependency.mkdir()
-    write_json(dependency / "package.json", {"name": "test-store-dependency", "version": "1.0.0"})
+    write_json(dependency / "package.json", {
+        "name": "test-store-dependency",
+        "version": "1.0.0",
+        "main": "index.js",
+        "bin": {"test-store-bin": "bin.js"},
+    })
+    (dependency / "index.js").write_text("module.exports = 'store-dep-ok';\n")
+    (dependency / "bin.js").write_text("#!/usr/bin/env node\nconsole.log('store-bin-ok');\n")
+    (dependency / "bin.js").chmod(0o755)
+    marker_file = project / "precheck-ran.marker"
+    precheck_dep = project / "precheck-marker-dep"
+    precheck_dep.mkdir()
+    write_json(precheck_dep / "package.json", {
+        "name": "precheck-marker-dep",
+        "version": "1.0.0",
+        "scripts": {
+            "postinstall": "node -e \"require('fs').writeFileSync(process.env.PRECHECK_MARKER, 'ran')\""
+        },
+    })
+    env["PRECHECK_MARKER"] = str(marker_file)
     for name in ("plain-extra", "wrapped-extra"):
         extra = project / name
         extra.mkdir()
@@ -64,8 +85,19 @@ def test_pnpm_store(cli, tool, workspace, env, version):
     modules = modules_dir / ".modules.yaml"
     assert modules.is_file()
     native_modules = snapshot_modules(modules_dir)
+    # Existing dependency remains executable before and after a pre-flight 125 denial.
+    assert invoke("node", "-e", "if (require('test-store-dependency') !== 'store-dep-ok') process.exit(1)").returncode == 0
+    assert invoke(modules_dir / ".bin" / "test-store-bin").stdout.strip() == "store-bin-ok"
     guarded = invoke(cli, tool, "install", "--offline", expected=125)
     assert "storeDir: .pnpm-store" in guarded.stderr, guarded.stderr
+    assert not marker_file.exists()
+    assert snapshot_modules(modules_dir) == native_modules
+    assert invoke("node", "-e", "if (require('test-store-dependency') !== 'store-dep-ok') process.exit(1)").returncode == 0
+    assert invoke(modules_dir / ".bin" / "test-store-bin").stdout.strip() == "store-bin-ok"
+    # Even when adding a package with postinstall, pre-flight denial must not spawn the child.
+    denied_add = invoke(cli, tool, "add", "-w", "--offline", "file:./precheck-marker-dep", expected=125)
+    assert "storeDir: .pnpm-store" in denied_add.stderr, denied_add.stderr
+    assert not marker_file.exists()
     assert snapshot_modules(modules_dir) == native_modules
 
     config = project / "pnpm-workspace.yaml"
@@ -100,6 +132,161 @@ def test_pnpm_store(cli, tool, workspace, env, version):
     )
 
 
+def write_tarball_package(target_tgz):
+    files = {
+        "package/package.json": (
+            json.dumps(
+                {
+                    "name": "roundtrip-dep",
+                    "version": "1.0.0",
+                    "main": "index.js",
+                    "bin": {"roundtrip-cli": "bin.js"},
+                }
+            )
+            + "\n",
+            0o644,
+        ),
+        "package/index.js": ("module.exports = { ok: true, version: '1.0.0' };\n", 0o644),
+        "package/bin.js": ("#!/usr/bin/env node\nconsole.log('roundtrip-ok');\n", 0o755),
+    }
+    with tarfile.open(target_tgz, "w:gz") as tar:
+        for name, (content, mode) in files.items():
+            data = content.encode("utf-8")
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            info.mode = mode
+            info.mtime = 0
+            tar.addfile(info, io.BytesIO(data))
+
+
+def test_native_isolated_native_roundtrip(cli, tool, manager, workspace, base_env, version):
+    roundtrip_root = workspace / "roundtrip-interoperability"
+    roundtrip_root.mkdir()
+    home = workspace / "roundtrip-home"
+    home.mkdir()
+    env = dict(base_env, HOME=str(home), XDG_DATA_HOME=str(home / "data"), XDG_CACHE_HOME=str(home / "cache"))
+    env.pop("CI", None)
+
+    def prepare_project(name):
+        proj = roundtrip_root / name
+        proj.mkdir()
+        vendor = proj / "vendor"
+        vendor.mkdir()
+        write_tarball_package(vendor / "roundtrip-dep-1.0.0.tgz")
+        write_json(
+            proj / "package.json",
+            {
+                "name": "roundtrip-app",
+                "version": "1.0.0",
+                "private": True,
+                "dependencies": {"roundtrip-dep": "file:./vendor/roundtrip-dep-1.0.0.tgz"},
+            },
+        )
+        local_tool = tool
+        local_env = dict(env)
+        if sys.platform == "linux":
+            runtime = proj / "runtime"
+            shutil.copytree(tool.parent.parent, runtime, symlinks=True)
+            local_tool = runtime / tool.parent.name / tool.name
+            local_env["PATH"] = f"{local_tool.parent}:{os.environ['PATH']}"
+        if manager == "npm":
+            (proj / ".npmrc").write_text("audit=false\nfund=false\n")
+            lock_cmd = [local_tool, "install", "--package-lock-only", "--offline", "--no-audit", "--no-fund"]
+            frozen_cmd = [local_tool, "ci", "--offline", "--no-audit", "--no-fund"]
+            tracked = ("package.json", "package-lock.json", ".npmrc")
+        else:
+            (proj / "pnpm-workspace.yaml").write_text(
+                "packages:\n  - '.'\nstoreDir: .pnpm-store\nupdateNotifier: false\n"
+            )
+            npmrc = "update-notifier=false\n"
+            if version.startswith("9."):
+                npmrc += "store-dir=.pnpm-store\n"
+            (proj / ".npmrc").write_text(npmrc)
+            lock_cmd = [local_tool, "install", "--lockfile-only", "--offline"]
+            frozen_cmd = [local_tool, "install", "--frozen-lockfile", "--offline"]
+            tracked = ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", ".npmrc")
+        return proj, local_tool, local_env, lock_cmd, frozen_cmd, tracked
+
+    def run_in(proj, args, run_env, expected=0):
+        res = subprocess.run(args, cwd=proj, env=run_env, text=True, capture_output=True, timeout=30)
+        assert res.returncode == expected, (args, res.stdout, res.stderr)
+        return res
+
+    def verify_installed_dependency(proj, run_env):
+        req = run_in(
+            proj,
+            ["node", "-e", "const d = require('roundtrip-dep'); if (!d.ok || d.version !== '1.0.0') process.exit(1);"],
+            run_env,
+        )
+        assert req.returncode == 0
+        cli_bin = proj / "node_modules" / ".bin" / "roundtrip-cli"
+        out = run_in(proj, [cli_bin], run_env)
+        assert out.stdout.strip() == "roundtrip-ok", out.stdout
+
+    # Generate a real lockfile cleanly first, then copy locked inputs to control and roundtrip projects.
+    seed, _, seed_env, seed_lock_cmd, _, seed_tracked = prepare_project("seed")
+    run_in(seed, seed_lock_cmd, seed_env)
+
+    control, control_tool, control_env, _, control_cmd, tracked = prepare_project("control")
+    roundtrip, rt_tool, rt_env, _, rt_cmd, _ = prepare_project("roundtrip")
+    lock_name = "package-lock.json" if manager == "npm" else "pnpm-lock.yaml"
+    lock_bytes = (seed / lock_name).read_bytes()
+    (control / lock_name).write_bytes(lock_bytes)
+    (roundtrip / lock_name).write_bytes(lock_bytes)
+
+    # Control: plain frozen install + verify dependency execution
+    run_in(control, control_cmd, control_env)
+    verify_installed_dependency(control, control_env)
+    expected_files = {rel: (control / rel).read_bytes() for rel in tracked}
+
+    # Roundtrip Step 1: plain frozen install + execute dependency
+    run_in(roundtrip, rt_cmd, rt_env)
+    verify_installed_dependency(roundtrip, rt_env)
+
+    # Roundtrip Step 2: isolated warm cache (initial baseline save + CI compare)
+    run_in(roundtrip, [cli, *rt_cmd], rt_env)
+    baseline = roundtrip / ".veil-tell" / f"{manager}.json"
+    baseline_data = json.loads(baseline.read_text())
+    assert baseline_data["backend"] == "isolated"
+    assert baseline_data["lockfile"]["ecosystem"] == manager
+    warm_ci = run_in(roundtrip, [cli, "ci", "--json", "--", *rt_cmd], rt_env)
+    assert json.loads(warm_ci.stdout)["comparison"]["status"] == "compared"
+
+    # Roundtrip Step 3: isolated cold cache (remove node_modules and local store)
+    for cache_rel in ("node_modules", ".pnpm-store"):
+        cache_path = roundtrip / cache_rel
+        if cache_path.exists():
+            shutil.rmtree(cache_path)
+    cold_ci = run_in(roundtrip, [cli, "ci", "--json", "--", *rt_cmd], rt_env)
+    assert json.loads(cold_ci.stdout)["comparison"]["status"] == "compared"
+
+    # Roundtrip Step 4: plain frozen install again after isolation (native -> isolated -> native)
+    run_in(roundtrip, rt_cmd, rt_env)
+    verify_installed_dependency(roundtrip, rt_env)
+
+    # Verify config/lock invariants match control byte-for-byte
+    for rel in tracked:
+        assert (roundtrip / rel).read_bytes() == expected_files[rel], f"{rel} changed during roundtrip"
+
+    if manager == "pnpm":
+        native_store = Path(run_in(roundtrip, [rt_tool, "store", "path"], rt_env).stdout.strip()).resolve()
+        isolated_store_res = run_in(
+            roundtrip,
+            [cli, "observe", "--backend", "isolated", "--", rt_tool, "store", "path"],
+            rt_env,
+        )
+        assert Path(isolated_store_res.stdout.strip()).resolve() == native_store, isolated_store_res.stdout
+        assert native_store.parent == roundtrip / ".pnpm-store", native_store
+        modules_yaml = (roundtrip / "node_modules" / ".modules.yaml").read_text()
+        assert str(native_store) in modules_yaml, modules_yaml
+
+    print(
+        f"{sys.platform} {manager} {version} roundtrip=native->isolated(warm+cold)->native "
+        "invariants=matched dependency_exec=ok",
+        flush=True,
+    )
+
+
 def test_manager(cli, tool, manager):
     with tempfile.TemporaryDirectory(prefix=f"veil-pm-{manager}-") as folder:
         root = Path(folder).resolve()
@@ -117,6 +304,8 @@ def test_manager(cli, tool, manager):
             env["PATH"] = f"{runtime_tool.parent}:{os.environ['PATH']}"
         if manager == "pnpm":
             test_pnpm_store(cli, runtime_tool, project, env, version)
+        if manager in ("npm", "pnpm"):
+            test_native_isolated_native_roundtrip(cli, tool, manager, project, env, version)
         package = {"name": "fixture", "private": True, "version": "1.0.0"}
         if manager == "bun":
             package["trustedDependencies"] = ["probe"]

@@ -16,9 +16,14 @@ permissions:
 env:
   # Match the Node.js version used by your existing npm CI.
   NODE_VERSION: '26.13.0'
+  # Keep manual baseline recording and PR checks on the same veil-tell release.
+  VEIL_TELL_VERSION: '0.6.0'
 
 jobs:
   npm-destinations:
+    # Requires an unprivileged runner with non-setuid /usr/bin/bwrap and user namespaces.
+    # For runner administrators preparing a custom image without bubblewrap:
+    #   sudo apt-get update && sudo apt-get install -y bubblewrap
     runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
@@ -26,11 +31,17 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Prepare isolation
+
+      - name: Check isolation prerequisites
+        if: github.event_name == 'workflow_dispatch'
         run: |
           if [[ ! -x /usr/bin/bwrap ]]; then
-            sudo apt-get update
-            sudo apt-get install -y bubblewrap
+            echo 'Missing non-setuid /usr/bin/bwrap. Ask the runner administrator to pre-install bubblewrap.' >&2
+            exit 125
+          fi
+          if ! /usr/bin/bwrap --unshare-user --unshare-net --ro-bind / / -- /bin/true >/dev/null 2>&1; then
+            echo 'Unprivileged user/network namespaces via /usr/bin/bwrap are unavailable on this runner.' >&2
+            exit 125
           fi
 
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -38,8 +49,10 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
+
       - name: Record a baseline candidate
         if: github.event_name == 'workflow_dispatch'
+        id: baseline
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -48,27 +61,42 @@ jobs:
           prepare="$state/candidate"
           mkdir "$prepare"
 
-          archive=veil-tell-0.4.0-linux-x86_64-gnu.tar.gz
-          curl -fsSL "https://github.com/mt4110/veil-tell/releases/download/v0.4.0/$archive" -o "$state/$archive"
+          version="${{ env.VEIL_TELL_VERSION }}"
+          archive="veil-tell-$version-linux-x86_64-gnu.tar.gz"
+          curl -fsSL "https://github.com/mt4110/veil-tell/releases/download/v$version/$archive" -o "$state/$archive"
           gh attestation verify "$state/$archive" --repo mt4110/veil-tell \
-            --source-ref refs/tags/v0.4.0 \
+            --source-ref "refs/tags/v$version" \
             --signer-workflow mt4110/veil-tell/.github/workflows/release-build.yml \
             --deny-self-hosted-runners
           tar -xzf "$state/$archive" -C "$state"
           unset GH_TOKEN
 
+          cli="$state/${archive%.tar.gz}/veil-tell"
+          bin_sha=$(sha256sum "$cli" | awk '{print $1}')
+          bin_ver=$("$cli" --version)
+
           runtime=$(mktemp -d "$PWD/.veil-tell-node.XXXXXX")
           node_bin=$(node -p 'require("node:fs").realpathSync(process.execPath)')
           cp -R "$(dirname "$(dirname "$node_bin")")/." "$runtime"
           export PATH="$runtime/bin:$PATH"
-          "$state/${archive%.tar.gz}/veil-tell" observe --backend isolated \
+          "$cli" observe --backend isolated \
             --baseline-out "$prepare/npm.json" --report "$prepare/report.json" -- npm ci
-          jq -e '.backend == "isolated" and .run_status.exit_code == 0' "$prepare/report.json" > /dev/null
+          jq -e '.backend == "isolated" and .isolation == "applied" and .run_status.exit_code == 0' \
+            "$prepare/report.json" > /dev/null
 
           printf 'path=%s\n' "$prepare" >> "$GITHUB_OUTPUT"
-          jq -r '.destinations[] | "- \(.host):\(.port)"' "$prepare/npm.json" >> "$GITHUB_STEP_SUMMARY"
-          printf '\nNext: review the candidate, then commit the reviewed file as .veil-tell/npm.json.\n' >> "$GITHUB_STEP_SUMMARY"
-        id: baseline
+          {
+            echo "### Baseline candidate recorded ($bin_ver)"
+            echo ""
+            echo "- Runner: \`$RUNNER_OS\` / \`$RUNNER_ARCH\`"
+            echo "- Binary SHA-256: \`$bin_sha\`"
+            echo ""
+            echo "Observed destinations:"
+            jq -r '.destinations[] | "- `\(.host):\(.port)` (\(.attempts) attempts)"' "$prepare/npm.json"
+            echo ""
+            echo "Next: review the candidate, then commit the reviewed file as \`.veil-tell/npm.json\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'workflow_dispatch'
         with:
@@ -82,22 +110,7 @@ jobs:
         uses: mt4110/veil-tell@v0
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - name: Show what to check next
-        if: failure() && github.event_name == 'pull_request'
-        env:
-          REPORT: ${{ steps.check.outputs.report }}
-        run: |
-          if [[ -f "$REPORT" ]]; then
-            reason=$(jq -r '.run_status.reason' "$REPORT")
-            case "$reason" in
-              new_destination) next='Review the blocked destination in the table above before accepting it or merging this PR.' ;;
-              volume_limit_exceeded) next='Open report.json and compare volume_anomalies[].observed with its limits.' ;;
-              *) next='Open report.json and the failing step log to identify why this check could not pass.' ;;
-            esac
-          else
-            next='Open the failing step log. Check that the PR base has a reviewed .veil-tell/npm.json and that isolation and release verification succeeded.'
-          fi
-          printf '\nNext: %s\n' "$next" >> "$GITHUB_STEP_SUMMARY"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always() && github.event_name == 'pull_request' && steps.check.outputs.report != ''
         with:

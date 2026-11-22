@@ -45,6 +45,8 @@ jobs:
           python3 -B tests/package_managers.py target/debug/veil-tell --persistent "$(dirname "$(dirname "$node_bin")")"
           python3 -B tests/agent_env.py target/debug/examples/receiver_cli "$(dirname "$(dirname "$node_bin")")"
       - run: python3 -B tests/verify.py target/debug/veil-tell target/debug/examples/receiver_cli
+      - run: python3 -B tests/action_summary.py target/debug/veil-tell
+      - run: python3 -B tests/monthly_rollup.py
       - name: Dependency manager lifecycle fixtures
         shell: bash
         run: |
