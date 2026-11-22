@@ -299,3 +299,81 @@ fn unregistered_target_heads_excluded_and_base_checkout_preserved_in_coverage() 
     assert_eq!(row.unregistered_target_runs.len(), 1);
     assert_eq!(row.effectiveness_status, "partial_or_pending_review");
 }
+
+fn single_target(target: serde_json::Value, runs: Vec<serde_json::Value>) -> GroupRollup {
+    let ledger: Ledger = serde_json::from_value(json!({
+        "window_start": "2026-12-01T00:00:00Z",
+        "window_end": "2026-12-31T00:00:00Z",
+        "repositories": [{"repo": "owner/repo", "required_jobs": ["check"]}],
+        "target_prs": [target],
+        "runs": runs,
+    }))
+    .unwrap();
+    rollup_ledger(&ledger).groups.remove(0)
+}
+
+fn rollup_run() -> serde_json::Value {
+    json!({
+        "repo": "owner/repo", "pr": 1, "job_matrix": "check",
+        "base_sha": "b1", "pr_head_sha": "h1", "checkout_sha": "c1",
+        "run_id": 2, "completed_at": "2026-12-02T00:00:00Z",
+    })
+}
+
+#[test]
+fn only_executions_establish_reruns_and_unknown_reviews_remain_pending() {
+    let target = json!({"repo": "owner/repo", "pr": 1, "target_heads": ["h1"]});
+    let mut placeholder = rollup_run();
+    placeholder["run_id"] = json!(1);
+    placeholder["status"] = json!("not_run");
+    let mut notifying = rollup_run();
+    notifying["summary_displayed"] = json!("shown");
+    notifying["reasons"] = json!([
+        {"kind": "new", "review": null},
+        {"kind": "blocked", "review": "unknown_class"},
+    ]);
+    let row = single_target(target, vec![placeholder, notifying]);
+    assert_eq!(row.runs_with_execution, 1);
+    assert_eq!(row.actual_notification_runs, 1);
+    assert_eq!(row.actual_notification_reruns, 0);
+    assert_eq!(row.prs_fully_evaluated, 1);
+    assert_eq!(row.displayed_reason_review["unreviewed"], 2);
+    assert_eq!(row.prs_with_unreviewed, 1);
+    assert_eq!(row.effectiveness_status, "partial_or_pending_review");
+}
+
+#[test]
+fn omitted_revision_fields_match_concrete_runs() {
+    for revision in [
+        json!({"pr_head_sha": "h1", "base_sha": "b1"}),
+        json!({"pr_head_sha": "h1", "checkout_sha": "c1"}),
+    ] {
+        let target = json!({"repo": "owner/repo", "pr": 1, "target_revisions": [revision]});
+        let row = single_target(target, vec![rollup_run()]);
+        assert_eq!(row.prs_fully_evaluated, 1);
+        assert_eq!(row.effectiveness_status, "ready");
+    }
+}
+
+#[test]
+fn windowed_evaluation_requires_a_valid_completion_time() {
+    let target = json!({"repo": "owner/repo", "pr": 1, "target_heads": ["h1"]});
+    for timestamp in [
+        None,
+        Some(json!(null)),
+        Some(json!("invalid")),
+        Some(json!("2026-11-31T00:00:00Z")),
+        Some(json!("2026-12-02T00:00:00+0é0")),
+    ] {
+        let mut run = rollup_run();
+        if let Some(timestamp) = timestamp {
+            run["completed_at"] = timestamp;
+        } else {
+            run.as_object_mut().unwrap().remove("completed_at");
+        }
+        let row = single_target(target.clone(), vec![run]);
+        assert_eq!(row.quiet_evaluatable_runs, 0);
+        assert_eq!(row.prs_fully_evaluated, 0);
+        assert_eq!(row.effectiveness_status, "partial_or_pending_review");
+    }
+}

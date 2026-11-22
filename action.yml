@@ -63,6 +63,15 @@ runs:
         printf 'binary_sha256=%s\n' "$bin_sha" >> "$GITHUB_OUTPUT"
         printf 'action_ref=%s\n' "${GITHUB_ACTION_REF:-unknown}" >> "$GITHUB_OUTPUT"
         printf 'action_sha=%s\n' "$action_sha" >> "$GITHUB_OUTPUT"
+    - name: Build report renderer
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$RUNNER_TEMP/veil-tell"
+        # The pinned v0.6.0 scanner predates the summary subcommand.
+        cargo build --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml" \
+          --target-dir "$PWD/summary-build" --bin veil-tell
+        install -m 755 "$PWD/summary-build/debug/veil-tell" bin/veil-tell-summary
     - name: Compare outbound destinations
       id: check
       shell: bash
@@ -79,12 +88,13 @@ runs:
         state=$(mktemp -d "$RUNNER_TEMP/veil-tell-state.XXXXXX")
         report_path="$state/report.json"
         cli="$RUNNER_TEMP/veil-tell/bin/veil-tell"
+        summary_cli="$RUNNER_TEMP/veil-tell/bin/veil-tell-summary"
         printf 'report=%s\n' "$report_path" >> "$GITHUB_OUTPUT"
 
         fail_before_run() {
           local message="$1"
           echo "$message" >&2
-          "$cli" summary "$report_path" \
+          "$summary_cli" summary "$report_path" \
             --github-output "$GITHUB_OUTPUT" \
             --missing-reason "$message" >> "$GITHUB_STEP_SUMMARY" || true
           printf 'status=125\n' >> "$GITHUB_OUTPUT"
@@ -130,7 +140,7 @@ runs:
           "$cli" ci --attribute-npm --baseline "$state/baseline.json" \
             --report "$report_path" -- /bin/sh -ec "$VEIL_COMMAND" || status=$?
         fi
-        "$cli" summary "$report_path" \
+        "$summary_cli" summary "$report_path" \
           --github-output "$GITHUB_OUTPUT" \
           --missing-reason "veil-tell exited with status $status without writing report.json." \
           >> "$GITHUB_STEP_SUMMARY" ||
@@ -147,5 +157,5 @@ runs:
       run: |
         set -euo pipefail
         comment=$(mktemp "$RUNNER_TEMP/veil-tell-comment.XXXXXX")
-        "$RUNNER_TEMP/veil-tell/bin/veil-tell" summary "$VEIL_REPORT" > "$comment"
+        "$RUNNER_TEMP/veil-tell/bin/veil-tell-summary" summary "$VEIL_REPORT" > "$comment"
         gh pr comment "$VEIL_PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$comment"

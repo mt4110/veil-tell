@@ -83,10 +83,19 @@ pub struct TargetPrEntry {
     pub required_jobs: Vec<String>,
 }
 
+fn deserialize_review<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(deserializer)?.unwrap_or_else(default_unreviewed))
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct ReasonReview {
     pub kind: String,
-    #[serde(default = "default_unreviewed")]
+    #[serde(
+        default = "default_unreviewed",
+        deserialize_with = "deserialize_review"
+    )]
     pub review: String,
 }
 
@@ -221,12 +230,27 @@ pub fn parse_utc(value: Option<&str>) -> Option<UtcTimestamp> {
     }
     let second: i64 = text.get(17..19)?.parse().ok()?;
 
+    let month_days = match month {
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) => 29,
+        2 => 28,
+        1..=12 => 31,
+        _ => return None,
+    };
+    if !(1..=month_days).contains(&day)
+        || !(0..24).contains(&hour)
+        || !(0..60).contains(&minute)
+        || !(0..=60).contains(&second)
+    {
+        return None;
+    }
+
     let mut rest = &text[19..];
     if let Some(after_dot) = rest.strip_prefix('.') {
-        let digits = after_dot
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .count();
+        let digits = after_dot.chars().take_while(|c| c.is_ascii_digit()).count();
+        if digits == 0 {
+            return None;
+        }
         rest = &after_dot[digits..];
     }
 
@@ -235,14 +259,15 @@ pub fn parse_utc(value: Option<&str>) -> Option<UtcTimestamp> {
     } else if rest.starts_with('+') || rest.starts_with('-') {
         let sign = if rest.starts_with('-') { -1 } else { 1 };
         let tz = &rest[1..];
-        let (oh, om) = if let Some((h, m)) = tz.split_once(':') {
-            (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?)
-        } else if tz.len() == 4 {
-            (tz[0..2].parse::<i64>().ok()?, tz[2..4].parse::<i64>().ok()?)
-        } else {
+        let (h, m) = tz.split_once(':').or_else(|| tz.split_at_checked(2))?;
+        if h.len() != 2 || m.len() != 2 || !h.bytes().chain(m.bytes()).all(|b| b.is_ascii_digit()) {
             return None;
-        };
-        sign * (oh * 3600 + om * 60)
+        }
+        let (hours, minutes) = (h.parse::<i64>().ok()?, m.parse::<i64>().ok()?);
+        if hours >= 24 || minutes >= 60 {
+            return None;
+        }
+        sign * (hours * 3600 + minutes * 60)
     } else {
         return None;
     };

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "rollup_types.rs"]
 mod types;
 pub use types::{
-    ALERT_KINDS, ExcludedRunRef, GroupRollup, Ledger, LedgerRun, ReasonReview, REVIEW_CLASSES,
+    ALERT_KINDS, ExcludedRunRef, GroupRollup, Ledger, LedgerRun, REVIEW_CLASSES, ReasonReview,
     RepositoryMeta, RollupSummary, TargetPrEntry, TargetRevision, empty_kind_counts,
     empty_review_counts, parse_utc, run_matches_entry,
 };
@@ -131,7 +131,17 @@ pub fn rollup_group(
             });
             continue;
         }
-        in_window_natural_runs.push(run.clone());
+        let mut accepted_run = run.clone();
+        if (window_start.is_some() || window_end.is_some())
+            && completed.is_none()
+            && matches!(accepted_run.status.as_str(), "" | "evaluated")
+        {
+            // When an observation window is active, a run without a valid completion
+            // timestamp has no proof of in-window completion and cannot establish
+            // completed evaluation coverage.
+            accepted_run.status = "undated".to_string();
+        }
+        in_window_natural_runs.push(accepted_run);
     }
 
     in_window_natural_runs.sort_by(|a, b| {
@@ -188,24 +198,25 @@ pub fn rollup_group(
         } else {
             run.status.as_str()
         };
-        if status != "not_run" {
+        let is_rerun = if status != "not_run" {
             runs_with_execution += 1;
-        }
-
-        let exam_key = (
-            run.repo.clone(),
-            run.pr,
-            if run.manager.is_empty() {
-                "npm".to_string()
-            } else {
-                run.manager.clone()
-            },
-            run.base_sha.clone().unwrap_or_default(),
-            run.pr_head_sha.clone().unwrap_or_default(),
-            run.checkout_sha.clone().unwrap_or_default(),
-            run.job_matrix.clone().unwrap_or_default(),
-        );
-        let is_rerun = !seen_exam_keys.insert(exam_key);
+            let exam_key = (
+                run.repo.clone(),
+                run.pr,
+                if run.manager.is_empty() {
+                    default_mgr.to_string()
+                } else {
+                    run.manager.clone()
+                },
+                run.base_sha.clone().unwrap_or_default(),
+                run.pr_head_sha.clone().unwrap_or_default(),
+                run.checkout_sha.clone().unwrap_or_default(),
+                run.job_matrix.clone().unwrap_or_default(),
+            );
+            !seen_exam_keys.insert(exam_key)
+        } else {
+            false
+        };
 
         let summary_displayed = if run.summary_displayed.is_empty() {
             "none"
@@ -295,8 +306,13 @@ pub fn rollup_group(
             prs_with_runs += 1;
         }
 
-        let mut expected_targets: BTreeSet<(String, String, String, String, String)> =
-            BTreeSet::new();
+        let mut expected_targets: BTreeSet<(
+            String,
+            Option<String>,
+            String,
+            Option<String>,
+            String,
+        )> = BTreeSet::new();
         let mut evaluated_targets: BTreeSet<(String, String, String, String, String)> =
             BTreeSet::new();
 
@@ -346,55 +362,49 @@ pub fn rollup_group(
                 }
             };
 
-            let mut expected_revisions: BTreeSet<(String, String, String)> = BTreeSet::new();
+            let mut expected_revisions: BTreeSet<(Option<String>, String, Option<String>)> =
+                BTreeSet::new();
             for rev in &entry.target_revisions {
-                let head = rev
-                    .pr_head_sha
-                    .clone()
-                    .or_else(|| rev.head_sha.clone())
-                    .unwrap_or_else(|| target_heads[0].clone());
-                expected_revisions.insert((
-                    rev.base_sha.clone().unwrap_or_default(),
-                    head,
-                    rev.checkout_sha.clone().unwrap_or_default(),
-                ));
+                let head = rev.pr_head_sha.as_ref().or(rev.head_sha.as_ref());
+                let base = rev.base_sha.as_ref().or(entry.base_sha.as_ref());
+                let checkout = rev.checkout_sha.as_ref().or(entry.checkout_sha.as_ref());
+                for head in head.map(std::slice::from_ref).unwrap_or(&target_heads) {
+                    expected_revisions.insert((base.cloned(), head.clone(), checkout.cloned()));
+                }
             }
 
             for h in &target_heads {
                 let head_runs: Vec<&&LedgerRun> = entry_runs
                     .iter()
                     .filter(|r| {
-                        r.pr_head_sha
-                            .as_deref()
-                            .unwrap_or(target_heads[0].as_str())
-                            == h.as_str()
+                        r.status != "not_run"
+                            && r.pr_head_sha.as_deref().unwrap_or(target_heads[0].as_str())
+                                == h.as_str()
                     })
                     .collect();
                 for r in &head_runs {
                     expected_revisions.insert((
-                        r.base_sha.clone().unwrap_or_default(),
+                        Some(r.base_sha.clone().unwrap_or_default()),
                         h.clone(),
-                        r.checkout_sha.clone().unwrap_or_default(),
+                        Some(r.checkout_sha.clone().unwrap_or_default()),
                     ));
                 }
-                if head_runs.is_empty()
-                    && !expected_revisions.iter().any(|rev| &rev.1 == h)
-                {
+                if head_runs.is_empty() && !expected_revisions.iter().any(|rev| &rev.1 == h) {
                     expected_revisions.insert((
-                        entry.base_sha.clone().unwrap_or_default(),
+                        entry.base_sha.clone(),
                         h.clone(),
-                        entry.checkout_sha.clone().unwrap_or_default(),
+                        entry.checkout_sha.clone(),
                     ));
                 }
             }
 
-            for (base_sha, head_sha, checkout_sha) in expected_revisions {
+            for (base_pat, head_sha, checkout_pat) in expected_revisions {
                 for j in &jobs {
                     expected_targets.insert((
                         mgr.clone(),
-                        base_sha.clone(),
+                        base_pat.clone(),
                         head_sha.clone(),
-                        checkout_sha.clone(),
+                        checkout_pat.clone(),
                         j.clone(),
                     ));
                 }
@@ -422,7 +432,20 @@ pub fn rollup_group(
             }
         }
 
-        if !expected_targets.is_empty() && expected_targets.is_subset(&evaluated_targets) {
+        let all_expected_satisfied = !expected_targets.is_empty()
+            && expected_targets
+                .iter()
+                .all(|(mgr, base_pat, head_sha, checkout_pat, job)| {
+                    evaluated_targets.iter().any(|(em, eb, eh, ec, ej)| {
+                        em == mgr
+                            && eh == head_sha
+                            && ej == job
+                            && base_pat.as_deref().is_none_or(|b| b == eb)
+                            && checkout_pat.as_deref().is_none_or(|c| c == ec)
+                    })
+                });
+
+        if all_expected_satisfied {
             prs_fully_evaluated += 1;
         } else if !evaluated_targets.is_empty() {
             prs_partially_evaluated += 1;
