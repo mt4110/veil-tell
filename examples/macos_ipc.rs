@@ -52,7 +52,7 @@ fn main() {
         std::process::exit(1);
     }
     let uid = unsafe { libc::getuid() };
-    assert_ne!(uid, 0);
+    assert!(uid != 0, "run this example as an unprivileged user");
 
     let cli = PathBuf::from(env::args().nth(1).expect("pass veil-tell binary path"))
         .canonicalize()
@@ -67,7 +67,7 @@ fn main() {
         .tempdir_in("/tmp")
         .unwrap();
     let root = tmp.keep().canonicalize().unwrap();
-    println!("uid={uid} evidence={}", root.display());
+    println!("evidence={}", root.display());
 
     let work = root.join("work");
     let reports = root.join("reports");

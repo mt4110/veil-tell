@@ -264,9 +264,6 @@ pub fn trial(fixture: &Path, node_root: &Path, cache: bool) {
             assert_eq!(
                 out.status.code(),
                 Some(code),
-                "cmd={cmd:?}\nstdout={}\nstderr={}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
             );
         }
         out
