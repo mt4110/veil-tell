@@ -44,16 +44,26 @@ def empty_kind_counts():
 
 
 def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, required_jobs, config_intervals, outages):
-    natural_prs = [p for p in prs if p.get("kind", "natural") == "natural"]
-    non_natural_prs = [p for p in prs if p.get("kind", "natural") != "natural"]
-    natural_pr_ids = {(p["repo"], p["pr"]) for p in natural_prs}
+    natural_entries = [p for p in prs if p.get("kind", "natural") == "natural"]
+    non_natural_entries = [p for p in prs if p.get("kind", "natural") != "natural"]
 
+    natural_entries_by_pr = defaultdict(list)
+    for entry in natural_entries:
+        natural_entries_by_pr[(entry["repo"], entry["pr"])].append(entry)
+    natural_pr_ids = set(natural_entries_by_pr.keys())
+
+    seen_non_natural_prs = set()
     non_natural_counts = defaultdict(int)
-    for p in non_natural_prs:
-        non_natural_counts[p.get("kind", "synthetic")] += 1
+    for p in non_natural_entries:
+        kind = p.get("kind", "synthetic")
+        unique_key = (p["repo"], p["pr"], kind)
+        if unique_key not in seen_non_natural_prs:
+            seen_non_natural_prs.add(unique_key)
+            non_natural_counts[kind] += 1
 
-    # Filter runs into natural vs non-natural and within-deadline vs post-deadline
+    # Filter runs into natural vs non-natural and enforce half-open [window_start, window_end)
     in_window_natural_runs = []
+    pre_window_runs = []
     post_deadline_runs = []
     non_natural_runs_count = 0
 
@@ -63,7 +73,20 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
             non_natural_runs_count += 1
             continue
         completed = parse_utc(run.get("completed_at"))
-        if window_end is not None and completed is not None and completed > window_end:
+        if window_start is not None and completed is not None and completed < window_start:
+            pre_window_runs.append(
+                {
+                    "repo": run["repo"],
+                    "pr": run["pr"],
+                    "pr_head_sha": run.get("pr_head_sha"),
+                    "job_matrix": run.get("job_matrix"),
+                    "run_id": run.get("run_id"),
+                    "run_attempt": run.get("run_attempt"),
+                    "completed_at": run.get("completed_at"),
+                }
+            )
+            continue
+        if window_end is not None and completed is not None and completed >= window_end:
             post_deadline_runs.append(
                 {
                     "repo": run["repo"],
@@ -83,6 +106,7 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
         key=lambda r: (
             r["repo"],
             r["pr"],
+            r.get("manager", ""),
             r.get("base_sha", ""),
             r.get("pr_head_sha", ""),
             r.get("checkout_sha", ""),
@@ -122,6 +146,7 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
         exam_key = (
             run["repo"],
             run["pr"],
+            run.get("manager", "npm"),
             run.get("base_sha", ""),
             run.get("pr_head_sha", ""),
             run.get("checkout_sha", ""),
@@ -186,31 +211,40 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
     prs_with_unreviewed = 0
     prs_with_missed_confirmed = 0
 
-    for pr in natural_prs:
-        pr_id = (pr["repo"], pr["pr"])
+    for pr_id in sorted(natural_entries_by_pr.keys()):
+        pr_entries = natural_entries_by_pr[pr_id]
         pr_runs = runs_by_pr.get(pr_id, [])
         executed_runs = [r for r in pr_runs if r.get("status", "evaluated") != "not_run"]
         if executed_runs:
             prs_with_runs += 1
 
-        target_heads = pr.get("target_heads")
-        if not target_heads:
-            heads = {r.get("pr_head_sha") for r in pr_runs if r.get("pr_head_sha")}
-            target_heads = sorted(heads) if heads else ["(unknown-head)"]
+        default_mgr = "npm" if manager_key == "all" else manager_key
+        expected_triples = set()
+        evaluated_triples = set()
 
-        jobs = pr.get("required_jobs") or required_jobs or sorted(
-            {r.get("job_matrix", "default") for r in pr_runs} or {"default"}
-        )
-        expected_pairs = {(h, j) for h in target_heads for j in jobs}
-        evaluated_pairs = {
-            (r.get("pr_head_sha") or target_heads[0], r.get("job_matrix", "default"))
-            for r in pr_runs
-            if r.get("status", "evaluated") in EVALUATABLE_STATUSES
-        }
+        for entry in pr_entries:
+            mgr = entry.get("manager", default_mgr)
+            mgr_runs = [r for r in pr_runs if r.get("manager", default_mgr) == mgr]
+            target_heads = entry.get("target_heads")
+            if not target_heads:
+                heads = {r.get("pr_head_sha") for r in mgr_runs if r.get("pr_head_sha")}
+                target_heads = sorted(heads) if heads else ["(unknown-head)"]
 
-        if expected_pairs and expected_pairs <= evaluated_pairs:
+            jobs = entry.get("required_jobs") or required_jobs or sorted(
+                {r.get("job_matrix", "default") for r in mgr_runs} or {"default"}
+            )
+            for h in target_heads:
+                for j in jobs:
+                    expected_triples.add((mgr, h, j))
+            for r in mgr_runs:
+                if r.get("status", "evaluated") in EVALUATABLE_STATUSES:
+                    evaluated_triples.add(
+                        (mgr, r.get("pr_head_sha") or target_heads[0], r.get("job_matrix", "default"))
+                    )
+
+        if expected_triples and expected_triples <= evaluated_triples:
             prs_fully_evaluated += 1
-        elif evaluated_pairs:
+        elif evaluated_triples:
             prs_partially_evaluated += 1
         else:
             prs_completely_missing += 1
@@ -265,9 +299,13 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
     else:
         fp_rate = None
 
-    if len(natural_prs) == 0:
+    if len(natural_pr_ids) == 0:
         effectiveness_status = "pending_zero_updates"
-    elif prs_with_unreviewed > 0 or prs_completely_missing > 0:
+    elif (
+        prs_with_unreviewed > 0
+        or prs_completely_missing > 0
+        or prs_partially_evaluated > 0
+    ):
         effectiveness_status = "partial_or_pending_review"
     else:
         effectiveness_status = "ready"
@@ -277,7 +315,7 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
         "manager": manager_key,
         "window_start": window_start.isoformat() if window_start else None,
         "window_end": window_end.isoformat() if window_end else None,
-        "target_prs": len(natural_prs),
+        "target_prs": len(natural_pr_ids),
         "prs_with_runs": prs_with_runs,
         "prs_fully_evaluated": prs_fully_evaluated,
         "prs_partially_evaluated": prs_partially_evaluated,
@@ -305,6 +343,7 @@ def rollup_group(repo_key, manager_key, prs, runs, window_start, window_end, req
         "prs_with_missed_confirmed": prs_with_missed_confirmed,
         "non_natural_prs": dict(non_natural_counts),
         "non_natural_runs": non_natural_runs_count,
+        "pre_window_runs": pre_window_runs,
         "post_deadline_runs": post_deadline_runs,
         "config_intervals": config_intervals,
         "outages": outages,

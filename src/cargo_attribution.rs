@@ -20,6 +20,7 @@ pub struct Toolchain {
     pub cargo: PathBuf,
     pub bin_dir: PathBuf,
     pub bind_root: PathBuf,
+    pub has_toolchain_selector: bool,
 }
 
 impl Toolchain {
@@ -33,9 +34,18 @@ impl Toolchain {
         let program = command.first()?;
         let (entry, resolved) = find_executable(program, cwd, path_env)?;
         let rustup = rustup_binary(&entry, &resolved, cwd, path_env)?;
-        let output = Command::new(rustup)
-            .arg0("rustup")
-            .args(["which", "cargo"])
+        let selector = command
+            .get(1)
+            .and_then(|arg| arg.to_str())
+            .and_then(|s| s.strip_prefix('+'))
+            .filter(|s| !s.is_empty());
+        let mut cmd = Command::new(rustup);
+        cmd.arg0("rustup").arg("which");
+        if let Some(toolchain) = selector {
+            cmd.args(["--toolchain", toolchain]);
+        }
+        let output = cmd
+            .arg("cargo")
             .current_dir(cwd)
             .env("PATH", path_env)
             // Block any implicit toolchain download while querying the active toolchain path.
@@ -68,12 +78,18 @@ impl Toolchain {
                 cargo,
                 bin_dir,
                 bind_root,
+                has_toolchain_selector: selector.is_some(),
             })
     }
 
     pub fn command(&self, command: &[OsString]) -> Vec<OsString> {
+        let skip = if self.has_toolchain_selector && command.len() >= 2 {
+            2
+        } else {
+            1
+        };
         std::iter::once(self.cargo.clone().into_os_string())
-            .chain(command[1..].iter().cloned())
+            .chain(command[skip..].iter().cloned())
             .collect()
     }
 }
@@ -278,9 +294,24 @@ mod tests {
         fs::create_dir_all(&shim_bin).unwrap();
         let rustup = shim_bin.join("rustup");
         let tc_cargo = tc_bin.join("cargo");
+        let pinned_toolchain = root.join("rustup/toolchains/1.94.0");
+        let pinned_bin = pinned_toolchain.join("bin");
+        fs::create_dir_all(&pinned_bin).unwrap();
+        for name in ["cargo", "rustc"] {
+            let p = pinned_bin.join(name);
+            fs::write(&p, "#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let pinned_cargo = pinned_bin.join("cargo");
         fs::write(
             &rustup,
-            format!("#!/bin/sh\nif [ \"$1\" = which ] && [ \"$2\" = cargo ]; then echo \"{}\"; exit 0; fi\nexit 1\n", tc_cargo.display()),
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = which ] && [ \"$2\" = cargo ]; then echo \"{}\"; exit 0; fi\n\
+                 if [ \"$1\" = which ] && [ \"$2\" = --toolchain ] && [ \"$3\" = 1.94.0 ] && [ \"$4\" = cargo ]; then echo \"{}\"; exit 0; fi\n\
+                 exit 1\n",
+                tc_cargo.display(),
+                pinned_cargo.display()
+            ),
         )
         .unwrap();
         fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).unwrap();
@@ -290,7 +321,7 @@ mod tests {
         fs::hard_link(&rustup, &shim_rustc).unwrap();
 
         let resolved = Toolchain::resolve_with_path(
-            &[OsString::from("cargo")],
+            &[OsString::from("cargo"), OsString::from("build")],
             &root,
             shim_bin.as_os_str(),
         )
@@ -298,6 +329,32 @@ mod tests {
         assert_eq!(resolved.cargo, tc_cargo);
         assert_eq!(resolved.bin_dir, tc_bin);
         assert_eq!(resolved.bind_root, toolchain);
+        assert!(!resolved.has_toolchain_selector);
+        assert_eq!(
+            resolved.command(&[OsString::from("cargo"), OsString::from("build")]),
+            vec![tc_cargo.clone().into_os_string(), OsString::from("build")]
+        );
+
+        let pinned_args = [
+            OsString::from("cargo"),
+            OsString::from("+1.94.0"),
+            OsString::from("build"),
+            OsString::from("--locked"),
+        ];
+        let resolved_pinned =
+            Toolchain::resolve_with_path(&pinned_args, &root, shim_bin.as_os_str()).unwrap();
+        assert_eq!(resolved_pinned.cargo, pinned_cargo);
+        assert_eq!(resolved_pinned.bin_dir, pinned_bin);
+        assert_eq!(resolved_pinned.bind_root, pinned_toolchain);
+        assert!(resolved_pinned.has_toolchain_selector);
+        assert_eq!(
+            resolved_pinned.command(&pinned_args),
+            vec![
+                pinned_cargo.into_os_string(),
+                OsString::from("build"),
+                OsString::from("--locked"),
+            ]
+        );
 
         // 3. Symlink to rustup-init in another directory (Homebrew rustup style) -> resolves toolchain
         let brew_opt = root.join("brew/opt/rustup/bin");

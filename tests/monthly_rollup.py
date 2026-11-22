@@ -212,9 +212,76 @@ class MonthlyRollupTests(unittest.TestCase):
             npm_row = next(g for g in summary["groups"] if g["repo"] == "mt4110/noise-repo")
             self.assertEqual(cargo_row["effectiveness_status"], "pending_zero_updates")
             self.assertEqual(npm_row["prs_partially_evaluated"], 1)
+            self.assertEqual(npm_row["effectiveness_status"], "partial_or_pending_review")
             self.assertEqual(npm_row["prs_with_noise"], 1)
             self.assertEqual(npm_row["displayed_reason_review"]["false_positive"], 0)
             self.assertEqual(npm_row["technical_false_positive_rate"], 0.0)
+
+    def test_half_open_window_boundaries_partial_status_and_multi_manager_pr(self):
+        # 1. Half-open window [window_start, window_end):
+        #    runs < window_start -> pre_window_runs
+        #    runs == window_end -> post_deadline_runs
+        # 2. Same PR (#50) updates both npm and cargo:
+        #    npm runs & alerts, cargo does not run -> total.target_prs=1, total.prs_alerted=1,
+        #    total.prs_partially_evaluated=1, effectiveness_status="partial_or_pending_review"
+        ledger = {
+            "window_start": "2026-12-01T00:00:00Z",
+            "window_end": "2026-12-31T00:00:00Z",
+            "repositories": [
+                {"repo": "mt4110/veil-tell", "manager": "npm", "required_jobs": ["npm-check"]},
+                {"repo": "mt4110/veil-tell", "manager": "cargo", "required_jobs": ["cargo-check"]},
+            ],
+            "target_prs": [
+                {"repo": "mt4110/veil-tell", "pr": 50, "manager": "npm", "kind": "natural", "target_heads": ["h50"]},
+                {"repo": "mt4110/veil-tell", "pr": 50, "manager": "cargo", "kind": "natural", "target_heads": ["h50"]},
+            ],
+            "runs": [
+                # Before window_start -> excluded from primary counts
+                {
+                    "repo": "mt4110/veil-tell", "pr": 50, "manager": "cargo",
+                    "base_sha": "b0", "pr_head_sha": "h50", "checkout_sha": "m0",
+                    "job_matrix": "cargo-check", "run_id": 1, "run_attempt": 1,
+                    "completed_at": "2026-11-30T23:59:59Z",
+                    "status": "evaluated", "summary_displayed": "none",
+                    "reasons": [],
+                },
+                # Exactly at window_start -> included
+                {
+                    "repo": "mt4110/veil-tell", "pr": 50, "manager": "npm",
+                    "base_sha": "b1", "pr_head_sha": "h50", "checkout_sha": "m1",
+                    "job_matrix": "npm-check", "run_id": 2, "run_attempt": 1,
+                    "completed_at": "2026-12-01T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "shown",
+                    "reasons": [{"kind": "new", "review": "actionable_true_positive"}],
+                },
+                # Exactly at window_end -> excluded (half-open interval)
+                {
+                    "repo": "mt4110/veil-tell", "pr": 50, "manager": "cargo",
+                    "base_sha": "b1", "pr_head_sha": "h50", "checkout_sha": "m1",
+                    "job_matrix": "cargo-check", "run_id": 3, "run_attempt": 1,
+                    "completed_at": "2026-12-31T00:00:00Z",
+                    "status": "evaluated", "summary_displayed": "none",
+                    "reasons": [],
+                },
+            ],
+        }
+        res = self.mod.rollup_ledger(ledger)
+        cargo_grp = next(g for g in res["groups"] if g["manager"] == "cargo")
+        npm_grp = next(g for g in res["groups"] if g["manager"] == "npm")
+        total = res["total"]
+
+        self.assertEqual(len(cargo_grp["pre_window_runs"]), 1)
+        self.assertEqual(len(cargo_grp["post_deadline_runs"]), 1)
+        self.assertEqual(cargo_grp["prs_completely_missing"], 1)
+        self.assertEqual(npm_grp["prs_fully_evaluated"], 1)
+        self.assertEqual(npm_grp["effectiveness_status"], "ready")
+
+        self.assertEqual(total["target_prs"], 1)
+        self.assertEqual(total["prs_alerted"], 1)
+        self.assertEqual(total["prs_fully_evaluated"], 0)
+        self.assertEqual(total["prs_partially_evaluated"], 1)
+        self.assertEqual(total["prs_completely_missing"], 0)
+        self.assertEqual(total["effectiveness_status"], "partial_or_pending_review")
 
 
 if __name__ == "__main__":

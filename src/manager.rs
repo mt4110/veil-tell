@@ -28,13 +28,21 @@ pub fn args(command: &[OsString]) -> &[OsString] {
 }
 
 pub fn verb(command: &[OsString]) -> Option<&str> {
-    let pnpm = executable(command) == Some("pnpm");
+    let exec = executable(command);
+    let pnpm = exec == Some("pnpm");
+    let cargo = exec == Some("cargo");
     let mut args = args(command).iter();
+    let mut first = true;
     loop {
         let Some(value) = args.next() else {
             return Some("");
         };
         let value = value.to_str()?;
+        if first && cargo && value.starts_with('+') && value.len() > 1 {
+            first = false;
+            continue;
+        }
+        first = false;
         if !value.starts_with('-') {
             return Some(value);
         }
@@ -92,6 +100,7 @@ mod tests {
             (&["yarn", "--version"][..], None),
             (&["bun", "install"][..], Some("bun")),
             (&["cargo", "build"][..], Some("cargo")),
+            (&["cargo", "+1.94.0", "build"][..], Some("cargo")),
             (&["npm", "publish"][..], None),
             (&["cargo", "publish"][..], None),
             (&["node", "install"][..], None),
