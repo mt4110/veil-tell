@@ -23,35 +23,48 @@ pub struct Toolchain {
     pub has_toolchain_selector: bool,
 }
 
+enum RustupInstallation {
+    SharedBinary(PathBuf),
+    HomebrewBin(PathBuf),
+}
+
 impl Toolchain {
     pub fn resolve(command: &[OsString], cwd: &Path) -> Option<Self> {
         let path_env =
             std::env::var_os("PATH").unwrap_or_else(|| "/usr/local/bin:/usr/bin:/bin".into());
-        let cargo_home = std::env::var_os("CARGO_HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")));
-        let mut rustup_paths = Vec::new();
-        if let Some(home) = cargo_home.filter(|home| home.is_absolute()) {
-            rustup_paths.push(home.join("bin/rustup"));
-        }
-        // Package-manager installations can provide the same shim outside CARGO_HOME.
-        rustup_paths.extend(
+        let cargo_home = std::env::var_os("CARGO_HOME").map(PathBuf::from);
+        let default_home = std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo"));
+        let mut installations: Vec<RustupInstallation> = [cargo_home, default_home]
+            .into_iter()
+            .flatten()
+            .filter(|home| home.is_absolute())
+            .map(|home| RustupInstallation::SharedBinary(home.join("bin/rustup")))
+            .collect();
+        installations.extend(
             ["/usr/bin", "/usr/local/bin", "/opt/homebrew/bin"]
                 .into_iter()
-                .flat_map(|dir| ["rustup", "rustup-init"].map(|name| Path::new(dir).join(name))),
+                .flat_map(|dir| ["rustup", "rustup-init"].map(|name| Path::new(dir).join(name)))
+                .map(RustupInstallation::SharedBinary),
         );
-        Self::resolve_with_path(command, cwd, &path_env, &rustup_paths)
+        if cfg!(target_os = "macos") {
+            installations.extend(
+                ["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/rustup/bin"]
+                    .into_iter()
+                    .map(|dir| RustupInstallation::HomebrewBin(PathBuf::from(dir))),
+            );
+        }
+        Self::resolve_with_path(command, cwd, &path_env, &installations)
     }
 
     fn resolve_with_path(
         command: &[OsString],
         cwd: &Path,
         path_env: &OsStr,
-        rustup_paths: &[PathBuf],
+        installations: &[RustupInstallation],
     ) -> Option<Self> {
         let program = command.first()?;
         let resolved = find_executable(program, cwd, path_env)?;
-        let rustup = rustup_binary(&resolved, cwd, rustup_paths)?;
+        let rustup = rustup_binary(&resolved, cwd, installations)?;
         let selector = command
             .get(1)
             .and_then(|arg| arg.to_str())
@@ -125,18 +138,42 @@ fn find_executable(program: &OsStr, cwd: &Path, path_env: &OsStr) -> Option<Path
     std::env::split_paths(path_env).find_map(|dir| resolve(dir.join(program)))
 }
 
-fn rustup_binary(cargo: &Path, cwd: &Path, rustup_paths: &[PathBuf]) -> Option<PathBuf> {
+fn rustup_binary(
+    cargo: &Path,
+    cwd: &Path,
+    installations: &[RustupInstallation],
+) -> Option<PathBuf> {
+    if cargo.starts_with(cwd) {
+        return None;
+    }
     let cargo_meta = cargo.metadata().ok()?;
-    rustup_paths.iter().find_map(|candidate| {
+    installations.iter().find_map(|installation| {
+        let candidate = match installation {
+            RustupInstallation::SharedBinary(path) => path.clone(),
+            // Homebrew installs separate environment wrappers for cargo and rustup.
+            RustupInstallation::HomebrewBin(bin) => bin.join("rustup"),
+        };
         let rustup = candidate.canonicalize().ok()?;
         let meta = rustup.metadata().ok()?;
-        // Both symlink and hardlink shims must identify a host installation.
-        (!candidate.starts_with(cwd)
-            && !rustup.starts_with(cwd)
-            && meta.is_file()
-            && meta.mode() & 0o111 != 0
-            && (meta.dev(), meta.ino()) == (cargo_meta.dev(), cargo_meta.ino()))
-            .then_some(rustup)
+        if candidate.starts_with(cwd)
+            || rustup.starts_with(cwd)
+            || !meta.is_file()
+            || meta.mode() & 0o111 == 0
+        {
+            return None;
+        }
+        let known_shim = match installation {
+            RustupInstallation::SharedBinary(_) => {
+                (meta.dev(), meta.ino()) == (cargo_meta.dev(), cargo_meta.ino())
+            }
+            RustupInstallation::HomebrewBin(bin) => {
+                let bin = bin.canonicalize().ok()?;
+                cargo.parent() == Some(bin.as_path())
+                    && rustup.parent() == Some(bin.as_path())
+                    && cargo.file_name() == Some(OsStr::new("cargo"))
+            }
+        };
+        known_shim.then_some(rustup)
     })
 }
 
@@ -284,14 +321,25 @@ mod tests {
         fs::hard_link(&rustup, &cargo).unwrap();
 
         assert_eq!(
-            rustup_binary(&cargo, &project, std::slice::from_ref(&rustup)),
+            rustup_binary(
+                &cargo,
+                &project,
+                &[RustupInstallation::SharedBinary(rustup.clone())]
+            ),
             None
         );
 
         let host = tempfile::tempdir().unwrap();
         let host_rustup = host.path().join("rustup");
         fs::copy(&rustup, &host_rustup).unwrap();
-        assert_eq!(rustup_binary(&cargo, &project, &[host_rustup]), None);
+        assert_eq!(
+            rustup_binary(
+                &cargo,
+                &project,
+                &[RustupInstallation::SharedBinary(host_rustup)]
+            ),
+            None
+        );
     }
 
     #[test]
@@ -363,7 +411,7 @@ mod tests {
             &[OsString::from("cargo"), OsString::from("build")],
             &project,
             shim_bin.as_os_str(),
-            std::slice::from_ref(&rustup),
+            &[RustupInstallation::SharedBinary(rustup.clone())],
         )
         .unwrap();
         assert_eq!(resolved.cargo, tc_cargo);
@@ -385,7 +433,7 @@ mod tests {
             &pinned_args,
             &project,
             shim_bin.as_os_str(),
-            std::slice::from_ref(&rustup),
+            &[RustupInstallation::SharedBinary(rustup.clone())],
         )
         .unwrap();
         assert_eq!(resolved_pinned.cargo, pinned_cargo);
@@ -414,9 +462,36 @@ mod tests {
             &[OsString::from("cargo")],
             &project,
             brew_bin.as_os_str(),
-            &[rustup_init],
+            &[RustupInstallation::SharedBinary(rustup_init)],
         )
         .unwrap();
         assert_eq!(resolved_brew.cargo, tc_cargo);
+
+        // Homebrew also ships paired wrappers with distinct file identities.
+        let brew_wrappers = root.join("brew/opt/rustup/wrappers");
+        fs::create_dir(&brew_wrappers).unwrap();
+        fs::copy(&rustup, brew_wrappers.join("rustup")).unwrap();
+        fs::copy(&plain_bin.join("cargo"), brew_wrappers.join("cargo")).unwrap();
+        let installations = [RustupInstallation::HomebrewBin(brew_wrappers.clone())];
+        assert_eq!(
+            Toolchain::resolve_with_path(
+                &[OsString::from("cargo")],
+                &project,
+                brew_wrappers.as_os_str(),
+                &installations,
+            )
+            .unwrap()
+            .cargo,
+            tc_cargo
+        );
+        assert_eq!(
+            Toolchain::resolve_with_path(
+                &[OsString::from("cargo")],
+                &project,
+                plain_bin.as_os_str(),
+                &installations,
+            ),
+            None
+        );
     }
 }
