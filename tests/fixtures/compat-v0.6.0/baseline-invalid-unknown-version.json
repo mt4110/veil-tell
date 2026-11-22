@@ -1,0 +1,6 @@
+{
+  "schema_version": 2,
+  "coverage": "http_connect_requests",
+  "backend": "proxy",
+  "destinations": []
+}

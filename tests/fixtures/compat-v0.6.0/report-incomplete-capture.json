@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "backend": "isolated",
+  "mode": "observe",
+  "isolation": "applied",
+  "coverage": {
+    "proxy": "http_connect_requests",
+    "direct_attempt_destinations": "incomplete",
+    "dns_attempts": "incomplete",
+    "proxy_capture": "incomplete"
+  },
+  "direct_attempts": [],
+  "child_status": {"exit_code": 0, "signal": null},
+  "run_status": {"exit_code": 125, "reason": "incomplete_capture"},
+  "destinations": [
+    {
+      "host": "blocked.example.invalid",
+      "port": 443,
+      "decision": "deny",
+      "reason": "policy_deny",
+      "result": "blocked",
+      "connected_ip": null,
+      "attempts": 1,
+      "sent_bytes": 0,
+      "max_connection_bytes": 0,
+      "received_bytes": 0
+    }
+  ],
+  "attempted": [],
+  "comparison": {
+    "status": "skipped",
+    "backend_changed": false,
+    "added": [],
+    "removed": [],
+    "count_changes": []
+  }
+}

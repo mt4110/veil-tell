@@ -1,0 +1,70 @@
+{
+  "schema_version": 1,
+  "timeout_seconds": 3,
+  "destination": {"host": "allowed.test", "port": 443},
+  "verdict": "passes",
+  "reason": "verified",
+  "exit_code": 0,
+  "phase": "complete",
+  "trials": {
+    "allowed": {
+      "schema_version": 1,
+      "backend": "isolated",
+      "mode": "restrict",
+      "isolation": "applied",
+      "coverage": {
+        "proxy": "http_connect_requests",
+        "direct_attempt_destinations": "not_observed",
+        "dns_attempts": "node_dns_lookup_hook",
+        "proxy_capture": "while_running"
+      },
+      "child_status": {"exit_code": 0, "signal": null},
+      "run_status": {"exit_code": 0, "reason": "completed"},
+      "destinations": [
+        {
+          "host": "allowed.test",
+          "port": 443,
+          "decision": "allow",
+          "reason": "policy_allow",
+          "result": "connected",
+          "connected_ip": "192.0.2.10",
+          "attempts": 1,
+          "sent_bytes": 128,
+          "max_connection_bytes": 128,
+          "received_bytes": 256
+        }
+      ],
+      "attempted": []
+    },
+    "denied": {
+      "schema_version": 1,
+      "backend": "isolated",
+      "mode": "restrict",
+      "isolation": "applied",
+      "coverage": {
+        "proxy": "http_connect_requests",
+        "direct_attempt_destinations": "not_observed",
+        "dns_attempts": "node_dns_lookup_hook",
+        "proxy_capture": "while_running"
+      },
+      "child_status": {"exit_code": 1, "signal": null},
+      "run_status": {"exit_code": 1, "reason": "child_failed"},
+      "destinations": [
+        {
+          "host": "allowed.test",
+          "port": 443,
+          "decision": "deny",
+          "reason": "policy_deny",
+          "result": "blocked",
+          "connected_ip": null,
+          "attempts": 1,
+          "sent_bytes": 0,
+          "max_connection_bytes": 0,
+          "received_bytes": 0
+        }
+      ],
+      "attempted": []
+    },
+    "restored": null
+  }
+}

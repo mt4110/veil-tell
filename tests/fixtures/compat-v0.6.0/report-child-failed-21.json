@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "backend": "proxy",
+  "mode": "observe",
+  "isolation": "not_requested",
+  "coverage": {
+    "proxy": "http_connect_requests",
+    "direct_attempt_destinations": "not_observed",
+    "dns_attempts": "not_observed",
+    "proxy_capture": "while_running"
+  },
+  "child_status": {"exit_code": 21, "signal": null},
+  "run_status": {"exit_code": 21, "reason": "child_failed"},
+  "destinations": [],
+  "comparison": {
+    "status": "skipped",
+    "backend_changed": false,
+    "added": [],
+    "removed": [],
+    "count_changes": []
+  }
+}

@@ -17,6 +17,9 @@ outputs:
   report:
     description: Path to the JSON report
     value: ${{ steps.check.outputs.report }}
+  should-comment:
+    description: Whether a new destination notification applies for PR commenting
+    value: ${{ steps.check.outputs.should_comment }}
 runs:
   using: composite
   steps:
@@ -25,6 +28,7 @@ runs:
         node-version: ${{ inputs.node-version }}
         package-manager-cache: false
     - name: Install veil-tell
+      id: install
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -48,6 +52,26 @@ runs:
           --source-ref "refs/tags/v$version" --deny-self-hosted-runners
         tar -xzf "$archive"
         install -m 755 "veil-tell-$version-$platform/veil-tell" bin/veil-tell
+        if command -v sha256sum >/dev/null 2>&1; then
+          bin_sha=$(sha256sum bin/veil-tell | awk '{print $1}')
+        else
+          bin_sha=$(shasum -a 256 bin/veil-tell | awk '{print $1}')
+        fi
+        bin_ver=$(bin/veil-tell --version 2>/dev/null || echo "$version")
+        action_sha=$(git -C "$GITHUB_ACTION_PATH" rev-parse HEAD 2>/dev/null || echo "${GITHUB_ACTION_REF:-unknown}")
+        printf 'binary_version=%s\n' "$bin_ver" >> "$GITHUB_OUTPUT"
+        printf 'binary_sha256=%s\n' "$bin_sha" >> "$GITHUB_OUTPUT"
+        printf 'action_ref=%s\n' "${GITHUB_ACTION_REF:-unknown}" >> "$GITHUB_OUTPUT"
+        printf 'action_sha=%s\n' "$action_sha" >> "$GITHUB_OUTPUT"
+    - name: Build report renderer
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd "$RUNNER_TEMP/veil-tell"
+        # The pinned v0.6.0 scanner predates the summary subcommand.
+        cargo build --locked --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml" \
+          --target-dir "$PWD/summary-build" --bin veil-tell
+        install -m 755 "$PWD/summary-build/debug/veil-tell" bin/veil-tell-summary
     - name: Compare outbound destinations
       id: check
       shell: bash
@@ -55,10 +79,28 @@ runs:
         VEIL_BASELINE: ${{ inputs.baseline }}
         VEIL_COMMAND: ${{ inputs.command }}
         VEIL_PR_BASE: ${{ github.event.pull_request.base.sha }}
+        VEIL_ACTION_REF: ${{ steps.install.outputs.action_ref }}
+        VEIL_ACTION_SHA: ${{ steps.install.outputs.action_sha }}
+        VEIL_BINARY_VERSION: ${{ steps.install.outputs.binary_version }}
+        VEIL_BINARY_SHA256: ${{ steps.install.outputs.binary_sha256 }}
       run: |
         set -euo pipefail
         state=$(mktemp -d "$RUNNER_TEMP/veil-tell-state.XXXXXX")
-        printf 'report=%s/report.json\n' "$state" >> "$GITHUB_OUTPUT"
+        report_path="$state/report.json"
+        cli="$RUNNER_TEMP/veil-tell/bin/veil-tell"
+        summary_cli="$RUNNER_TEMP/veil-tell/bin/veil-tell-summary"
+        printf 'report=%s\n' "$report_path" >> "$GITHUB_OUTPUT"
+
+        fail_before_run() {
+          local message="$1"
+          echo "$message" >&2
+          "$summary_cli" summary "$report_path" \
+            --github-output "$GITHUB_OUTPUT" \
+            --missing-reason "$message" >> "$GITHUB_STEP_SUMMARY" || true
+          printf 'status=125\n' >> "$GITHUB_OUTPUT"
+          exit 125
+        }
+
         if [[ -n "$VEIL_PR_BASE" ]]; then
           export VEIL_TELL_PR_BASE_LOCK_DIR="$state"
           for lockfile in package-lock.json pnpm-lock.yaml yarn.lock bun.lock Cargo.lock; do
@@ -69,17 +111,21 @@ runs:
               fi
             fi
           done
-          git show "$VEIL_PR_BASE:$VEIL_BASELINE" > "$state/baseline.json" || {
-            echo 'Cannot read the baseline from the PR base commit. Check fetch-depth and commit the reviewed baseline first.' >&2
-            exit 125
-          }
+          if ! git show "$VEIL_PR_BASE:$VEIL_BASELINE" > "$state/baseline.json"; then
+            fail_before_run "Cannot read the baseline ($VEIL_BASELINE) from the PR base commit. Check fetch-depth: 0 and commit the reviewed baseline first."
+          fi
         else
+          if [[ ! -f "$VEIL_BASELINE" ]]; then
+            fail_before_run "Baseline file not found: $VEIL_BASELINE. Record and commit a reviewed baseline first."
+          fi
           cp -- "$VEIL_BASELINE" "$state/baseline.json"
         fi
         if [[ "$(uname -s)" == Linux ]]; then
           if [[ ! -x /usr/bin/bwrap ]]; then
-            echo 'Install non-setuid bubblewrap at /usr/bin/bwrap on this runner before running veil-tell.' >&2
-            exit 125
+            fail_before_run "Unprivileged non-setuid bubblewrap (/usr/bin/bwrap) is not installed on this runner. Ask the runner administrator to install bubblewrap."
+          fi
+          if ! /usr/bin/bwrap --unshare-user --unshare-net --ro-bind / / -- /bin/true >/dev/null 2>&1; then
+            fail_before_run "Unprivileged user/network namespaces via /usr/bin/bwrap are unavailable on this runner. Ask the runner administrator to enable unprivileged namespaces."
           fi
           runtime=$(mktemp -d "$PWD/.veil-tell-node.XXXXXX")
           node_bin=$(node -p 'require("node:fs").realpathSync(process.execPath)')
@@ -87,22 +133,22 @@ runs:
           export PATH="$runtime/bin:$PATH"
         fi
         status=0
-        cli="$RUNNER_TEMP/veil-tell/bin/veil-tell"
         if [[ "$VEIL_COMMAND" =~ ^(npm|pnpm|yarn|bun|cargo)([[:space:]][a-zA-Z0-9_./=:-]+)+$ ]]; then
           read -r -a argv <<< "$VEIL_COMMAND"
-          "$cli" ci --baseline "$state/baseline.json" --report "$state/report.json" -- "${argv[@]}" || status=$?
+          "$cli" ci --baseline "$state/baseline.json" --report "$report_path" -- "${argv[@]}" || status=$?
         else
           "$cli" ci --attribute-npm --baseline "$state/baseline.json" \
-            --report "$state/report.json" -- /bin/sh -ec "$VEIL_COMMAND" || status=$?
+            --report "$report_path" -- /bin/sh -ec "$VEIL_COMMAND" || status=$?
         fi
-        if [[ -f "$state/report.json" ]]; then
-          python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$state/report.json" >> "$GITHUB_STEP_SUMMARY" ||
-            echo 'Could not write the job summary. See the JSON report.' >&2
-        fi
+        "$summary_cli" summary "$report_path" \
+          --github-output "$GITHUB_OUTPUT" \
+          --missing-reason "veil-tell exited with status $status without writing report.json." \
+          >> "$GITHUB_STEP_SUMMARY" ||
+          echo 'Could not write the job summary. See the JSON report.' >&2
         printf 'status=%s\n' "$status" >> "$GITHUB_OUTPUT"
         exit "$status"
     - name: Comment on new destinations
-      if: ${{ always() && inputs.pr-comment == 'true' && github.event_name == 'pull_request' && steps.check.outputs.status == '21' }}
+      if: ${{ always() && inputs.pr-comment == 'true' && github.event_name == 'pull_request' && steps.check.outputs.should_comment == 'true' }}
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -111,5 +157,5 @@ runs:
       run: |
         set -euo pipefail
         comment=$(mktemp "$RUNNER_TEMP/veil-tell-comment.XXXXXX")
-        python3 "$GITHUB_ACTION_PATH/.github/destination-summary.py" "$VEIL_REPORT" > "$comment"
+        "$RUNNER_TEMP/veil-tell/bin/veil-tell-summary" summary "$VEIL_REPORT" > "$comment"
         gh pr comment "$VEIL_PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file "$comment"

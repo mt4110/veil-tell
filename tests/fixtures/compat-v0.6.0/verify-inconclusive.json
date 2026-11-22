@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "timeout_seconds": 3,
+  "destination": {"host": "allowed.test", "port": 443},
+  "verdict": "inconclusive",
+  "reason": "isolation_unconfirmed",
+  "exit_code": 2,
+  "phase": "allowed",
+  "trials": {
+    "allowed": {
+      "error": "isolation probe failed"
+    },
+    "denied": null,
+    "restored": null
+  }
+}

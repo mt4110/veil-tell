@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "backend": "isolated",
+  "mode": "observe",
+  "isolation": "applied",
+  "coverage": {
+    "proxy": "http_connect_requests",
+    "direct_attempt_destinations": "ip_port",
+    "dns_attempts": "node_dns_lookup_hook",
+    "proxy_capture": "while_running"
+  },
+  "direct_attempts": [],
+  "child_status": {"exit_code": 1, "signal": null},
+  "run_status": {"exit_code": 22, "reason": "volume_limit_exceeded"},
+  "destinations": [
+    {
+      "host": "registry.npmjs.org",
+      "port": 443,
+      "decision": "allow",
+      "reason": "observe",
+      "result": "connected",
+      "connected_ip": "104.16.0.1",
+      "attempts": 1,
+      "sent_bytes": 262144,
+      "max_connection_bytes": 262144,
+      "received_bytes": 0
+    }
+  ],
+  "volume_anomalies": [
+    {
+      "host": "registry.npmjs.org",
+      "port": 443,
+      "observed": {"sent_bytes": 262144, "connections": 1, "max_connection_bytes": 262144},
+      "limits": {"sent_bytes": 262144, "connections": 64, "max_connection_bytes": 131072},
+      "blocked": true,
+      "attribution": []
+    }
+  ],
+  "attempted": [],
+  "comparison": {
+    "status": "new_destinations_only",
+    "backend_changed": false,
+    "added": [],
+    "removed": [],
+    "count_changes": []
+  }
+}
