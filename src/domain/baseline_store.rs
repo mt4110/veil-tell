@@ -77,13 +77,20 @@ pub(super) fn replace(path: &Path, value: &impl Serialize, limit: u64) -> Result
 }
 
 pub(super) fn command_key(command: &[OsString]) -> String {
+    use std::fmt::Write as _;
+
     let mut digest = Sha256::new();
     for arg in command {
         let bytes = arg.as_bytes();
         digest.update((bytes.len() as u64).to_le_bytes());
         digest.update(bytes);
     }
-    format!("{:x}", digest.finalize())
+    let digest = digest.finalize();
+    let mut key = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(key, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    key
 }
 
 pub(super) fn baseline_path(state: &Path, key: &str) -> PathBuf {

@@ -498,6 +498,14 @@ mod tests {
     }
 
     #[test]
+    fn command_key_keeps_the_persisted_sha256_format() {
+        assert_eq!(
+            command_key(&["ab".into(), "c".into()]),
+            "43ee655579de01ca739b3f95c1c2d3f46d353b2c0df818064ea594506cdb2617"
+        );
+    }
+
+    #[test]
     fn argument_boundaries_are_part_of_the_command_key() {
         assert_ne!(
             command_key(&["ab".into(), "c".into()]),
