@@ -192,12 +192,23 @@ PY
 
 ### GitHub Actions の配布物と来歴を確認する
 
-[配布ビルドのワークフロー](../.github/workflows/release-build.yml) は GitHub ホストの macOS 26 arm64 と Ubuntu 26.04 x86_64 で動きます。Cargo のバージョンと一致する `vMAJOR.MINOR.PATCH` タグ（例 `v0.4.0`）を push すると起動します。各ジョブはアーカイブと中の実行ファイルに来歴証明を作成します。集約ジョブは両アーカイブの SHA-256 を再照合し、アーカイブ2件と `SHA256SUMS` を `veil-tell-distribution` という Actions アーティファクトにまとめます。
+[配布ビルドのワークフロー](../.github/workflows/release-build.yml) は Cargo のバージョンと一致する `vMAJOR.MINOR.PATCH` タグを push すると起動します。macOS arm64、Linux aarch64、Linux x86_64 の各ジョブはアーカイブと実行ファイルに来歴証明を作成します。集約ジョブは SHA-256 を再照合し、`SHA256SUMS` を Cosign で署名・検証します。
 
-GitHub CLI を用意して `gh auth login` で認証します。配布ページから取得したアーカイブ2件と `SHA256SUMS` を同じディレクトリに置き、上の手順で SHA-256 を照合します。配布前の確認では、成功した Actions 実行の ID を指定して同じ3ファイルを取得できます。
+リリースを準備する際は、成功した Actions 実行から `veil-tell-distribution` をダウンロードします。アーカイブ3件、`SHA256SUMS`、`SHA256SUMS.sig`（Base64 の分離署名）、`SHA256SUMS.sigstore.json`（署名と検証用の証明書などを含むバンドル）をリリースのアセットに添付します。
 
 ```sh
 gh run download RUN_ID --repo mt4110/veil-tell --name veil-tell-distribution
+```
+
+署名付きの配布物を検証するには、ダウンロード先で Cosign を使います。`TAG` を対象のリリースタグ（先頭の `v` を含む）に置き換えてください。署名の検証に成功した場合だけ、アーカイブの SHA-256 を照合します。 [Cosign の検証手順](https://docs.sigstore.dev/quickstart/quickstart-cosign/)
+
+```sh
+cosign verify-blob \
+  --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/mt4110/veil-tell/.github/workflows/release-build.yml@refs/tags/TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS &&
+  shasum -a 256 -c SHA256SUMS
 ```
 
 アーカイブを展開する前に、来歴証明を照合します。以下はタグ `v0.1.0` の例です。ファイル名と `tag` を対象のリリースに合わせます。
